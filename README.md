@@ -101,7 +101,7 @@ RWS Container (0x080D) {
 ```
 
 ### LLRR Layout Discovery
-Through extensive reverse engineering, we discovered Burnout 3 uses an unusual stereo interleave:
+Through extensive reverse engineering, i discovered Burnout 3 uses an unusual stereo interleave:
 - **Not** standard L[2048] R[2048] alternating
 - **Actual**: L[2048] L[2048] R[2048] R[2048] in 8192-byte super-blocks
 - Confirmed by decoding original tracks with vgmstream and comparing energy patterns
