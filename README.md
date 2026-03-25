@@ -123,7 +123,7 @@ This was verified by byte-comparison against decoded/re-encoded original tracks.
 
 Contributions welcome! Areas that need help:
 
-- **HostFS integration** — [Nahelam's HostFS patch](https://github.com/Nahelam/PCSX2-HostFS-Patches) could enable larger EATRAX files for full-length songs
+- **HostFS integration** — [Nehalem's HostFS patch](https://github.com/Nahelam/PCSX2-HostFS-Patches) could enable larger EATRAX files for full-length songs
 - **Song metadata** — Finding where artist/title strings are stored to allow custom names in the EA Trax UI
 - **PAL/JP support** — Adding support for European and Japanese ISO versions
 - **Cross-platform** — Windows/Mac support (PySide6 is cross-platform, C encoder needs platform builds)
@@ -131,7 +131,7 @@ Contributions welcome! Areas that need help:
 
 ## 🙏 Credits & Acknowledgments
 
-- **[Nahelam](https://github.com/Nahelam)** — [PS2-Game-Mods](https://github.com/Nahelam/PS2-Game-Mods) for Burnout 3 modding research and HostFS patches
+- **[Nehalem](https://github.com/Nahelam)** — [PS2-Game-Mods](https://github.com/Nahelam/PS2-Game-Mods) for Burnout 3 modding research and HostFS patches
 - **vgmstream** — For confirming the audio codec and sample rate
 - **EA / Criterion Games** — For making Burnout 3: Takedown, one of the greatest racing games ever
 
