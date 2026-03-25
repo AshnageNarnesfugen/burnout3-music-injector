@@ -1,0 +1,19 @@
+# Compiled C encoder
+libpsxenc.so
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ISO files (don't commit game data)
+*.iso
+*.bin
+*.raw
+
+# Temp
+*.tmp
