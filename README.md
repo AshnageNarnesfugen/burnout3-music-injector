@@ -9,6 +9,12 @@
 
 Replace the EA Trax soundtrack with your own music. Supports MP3, FLAC, M4A, OGG, WAV, OPUS, and more. Features a full GUI with drag & drop, automatic PS-ADPCM encoding, and in-place ISO patching.
 
+## 🎬 Demo - Gameplay Footage
+
+[![Burnout 3 Custom Music Demo](https://img.youtube.com/vi/bScxPc_APYo/maxresdefault.jpg)](https://www.youtube.com/watch?v=bScxPc_APYo)
+
+*Click to watch gameplay with custom music injected*
+
 ## ✨ Features
 
 - **44 track slots** — Replace any or all songs in the EA Trax playlist
@@ -19,6 +25,12 @@ Replace the EA Trax soundtrack with your own music. Supports MP3, FLAC, M4A, OGG
 - **In-place ISO patching** — No ISO rebuild needed, fast and safe
 - **Drag & drop GUI** — PySide6/Qt6 interface with dark theme
 - **Auto-detect** — Parses ISO9660 + RWS headers to find all tracks
+
+## 🎬 Demo
+
+[![Burnout 3 Custom Music Demo](https://img.youtube.com/vi/bScxPc_APYo/maxresdefault.jpg)](https://www.youtube.com/watch?v=bScxPc_APYo)
+
+*Click to watch gameplay with custom music injected*
 
 ## 🔧 Installation
 
