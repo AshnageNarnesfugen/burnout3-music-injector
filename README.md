@@ -15,6 +15,17 @@ Replace the EA Trax soundtrack with your own music. Supports MP3, FLAC, M4A, OGG
 
 *Click to watch gameplay with custom music injected*
 
+## 📸 UI Screenshots
+
+### ISO Tab
+![ISO Tab](screenshots/iso-injection.png)
+
+### Track Assignment
+![Track Assignment](screenshots/assign.png)
+
+### Processing
+![Processing](screenshots/process.png)
+
 ## ✨ Features
 
 - **44 track slots** — Replace any or all songs in the EA Trax playlist
