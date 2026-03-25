@@ -159,15 +159,24 @@ def _compile_c_encoder():
 
     if need_compile and os.path.isfile(c_path):
         try:
-            r = subprocess.run(
-                ["gcc", "-O3", "-shared", "-fPIC", "-o", so_path, c_path, "-lm"],
-                capture_output=True, text=True, timeout=30
-            )
+            if sys.platform == 'win32':
+                so_path = os.path.join(script_dir, "psxenc.dll")
+                r = subprocess.run(
+                    ["gcc", "-O3", "-shared", "-o", so_path, c_path],
+                    capture_output=True, text=True, timeout=30
+                )
+            else:
+                r = subprocess.run(
+                    ["gcc", "-O3", "-shared", "-fPIC", "-o", so_path, c_path, "-lm"],
+                    capture_output=True, text=True, timeout=30
+                )
             if r.returncode != 0:
                 return None
         except Exception:
             return None
 
+    if sys.platform == 'win32':
+        so_path = os.path.join(script_dir, "psxenc.dll")
     if os.path.isfile(so_path):
         try:
             lib = ctypes.CDLL(so_path)
@@ -440,7 +449,7 @@ class ISODropZone(QFrame):
         self.icon_lbl.setStyleSheet("font-size:36px;border:none")
         self.icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(self.icon_lbl)
-        self.text_lbl = QLabel("Arrastra tu ISO de Burnout 3 aquí\no haz clic para buscar")
+        self.text_lbl = QLabel("Drag your Burnout 3 Takedown ISO here\no click to search")
         self.text_lbl.setStyleSheet("color:#666;font-size:13px;border:none;font-weight:bold")
         self.text_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(self.text_lbl)
@@ -785,31 +794,35 @@ class InjectionWorker(QObject):
             step = 0
 
             if not os.path.isfile(self.iso_path):
-                raise Exception(f"ISO no encontrado: {self.iso_path}")
+                raise Exception(f"ISO not found: {self.iso_path}")
             for sid, src in self.assignments.items():
                 if not os.path.isfile(src):
-                    raise Exception(f"Audio no encontrado: {src}")
+                    raise Exception(f"Audio not found: {src}")
 
             iso_size = os.path.getsize(self.iso_path)
+
             out_dir = os.path.dirname(os.path.abspath(self.output_iso)) or '.'
-            st = os.statvfs(out_dir)
-            free = st.f_bavail * st.f_frsize
+            try:
+                usage = shutil.disk_usage(out_dir)
+                free = usage.free
+            except (OSError, AttributeError):
+                free = float('inf')
             if free < iso_size + 100*1048576:
                 raise Exception(
-                    f"Espacio insuficiente: {free//1048576} MB libres, "
-                    f"~{(iso_size+100*1048576)//1048576} MB necesarios"
+                    f"Not enough space: {free//1048576} MB free, "
+                    f"~{(iso_size+100*1048576)//1048576} MB needed"
                 )
 
             # Step 1: Copy ISO
-            self.progress.emit(step/total, "Copiando ISO...")
-            self.log_line.emit("▶ Copiando ISO para parcheo in-place")
+            self.progress.emit(step/total, "Copying ISO...")
+            self.log_line.emit("▶ Copying ISO for in-place patching")
             shutil.copy2(self.iso_path, self.output_iso)
-            self.log_line.emit(f"✓ Copia: {os.path.basename(self.output_iso)}")
+            self.log_line.emit(f"✓ Copy: {os.path.basename(self.output_iso)}")
             step += 1
 
             # Step 2: Read ISO and find EATRAX files
-            self.progress.emit(step/total, "Leyendo ISO y analizando EATRAX...")
-            self.log_line.emit("▶ Parseando ISO9660 + contenedores RWS")
+            self.progress.emit(step/total, "Reading ISO and analyzing EATRAX...")
+            self.log_line.emit("▶ Parsing ISO9660 + RWS containers")
 
             with open(self.output_iso, 'rb') as f:
                 iso_data = bytearray(f.read())
@@ -836,13 +849,13 @@ class InjectionWorker(QObject):
                         min_d = adpcm_slot_duration(min(sizes))
                         max_d = adpcm_slot_duration(max(sizes))
                         self.log_line.emit(
-                            f"  ↳ Duración por track: {min_d:.0f}s – {max_d:.0f}s"
+                            f"  ↳ Duration per track: {min_d:.0f}s – {max_d:.0f}s"
                         )
                 else:
-                    self.log_line.emit(f"⚠ {rws_name} no encontrado en ISO")
+                    self.log_line.emit(f"⚠ {rws_name} Not found in iso")
 
             if not eatrax_info:
-                raise Exception("No se encontraron EATRAX en el ISO")
+                raise Exception("No EATRAX found in ISO")
 
             # Build slot map
             slot_map = {}
@@ -861,7 +874,7 @@ class InjectionWorker(QObject):
                     slot_map[slot_id] = (iso_off + trk_off_in_rws, trk_size, sr, ch)
                     slot_id += 1
 
-            self.log_line.emit(f"✓ {len(slot_map)} slots mapeados en total")
+            self.log_line.emit(f"✓ {len(slot_map)} mapped slots")
             step += 1
 
             # Step 3: Convert and patch each assigned track
@@ -871,7 +884,7 @@ class InjectionWorker(QObject):
                     src_name = os.path.basename(source)
 
                     if slot_id not in slot_map:
-                        self.log_line.emit(f"✗ Slot {slot_id:02d}: no mapeado en EATRAX")
+                        self.log_line.emit(f"✗ Slot {slot_id:02d}: not mapped in EATRAX")
                         continue
 
                     abs_off, slot_size, sr, ch = slot_map[slot_id]
@@ -887,14 +900,14 @@ class InjectionWorker(QObject):
                     if needs_fadeout:
                         self.log_line.emit(
                             f"  ↳ {html_mod.escape(src_name)} ({dur_s}) → "
-                            f"truncado a {slot_dur:.0f}s con fade out"
+                            f"truncated to {slot_dur:.0f}s with fade out"
                         )
                     elif src_dur:
                         self.log_line.emit(
-                            f"  ↳ {html_mod.escape(src_name)} ({dur_s}) → cabe completa ✓"
+                            f"  ↳ {html_mod.escape(src_name)} ({dur_s}) → fits completely ✓"
                         )
 
-                    self.progress.emit(step/total, f"Convirtiendo {src_name}...")
+                    self.progress.emit(step/total, f"Converting {src_name}...")
                     temp_raw = os.path.join(tmp, f"t{slot_id:02d}.raw")
 
                     # Build ffmpeg command with optional fade out
@@ -922,12 +935,12 @@ class InjectionWorker(QObject):
                         continue
 
                     if not os.path.isfile(temp_raw) or os.path.getsize(temp_raw) == 0:
-                        self.log_line.emit(f"✗ Slot {slot_id:02d}: archivo vacío")
+                        self.log_line.emit(f"✗ Slot {slot_id:02d}: empty file")
                         step += 1
                         continue
 
                     # Read PCM and encode to PS-ADPCM
-                    self.progress.emit(step/total, f"Encodando PS-ADPCM {src_name}...")
+                    self.progress.emit(step/total, f"Encoding PS-ADPCM {src_name}...")
                     with open(temp_raw, 'rb') as af:
                         pcm_data = af.read()
 
@@ -956,15 +969,15 @@ class InjectionWorker(QObject):
             if replaced == 0:
                 if os.path.isfile(self.output_iso):
                     os.remove(self.output_iso)
-                raise Exception("No se parchó ningún track")
+                raise Exception("No tracks were patched")
 
-            self.progress.emit(1.0, "¡Completado!")
-            self.log_line.emit(f"✓ {replaced} tracks parcheados in-place en el ISO")
+            self.progress.emit(1.0, "Completed!")
+            self.log_line.emit(f"✓ {replaced} tracks patched in-place in ISO")
             self.log_line.emit(f"✓ {self.output_iso}")
-            self.finished.emit(True, f"¡Listo! {replaced} tracks.\n{self.output_iso}")
+            self.finished.emit(True, f"Done! {replaced} tracks.\n{self.output_iso}")
 
         except subprocess.TimeoutExpired:
-            self.finished.emit(False, "Timeout: ffmpeg tardó demasiado.")
+            self.finished.emit(False, "Timeout: ffmpeg took too long.")
         except OSError as e:
             self.finished.emit(False, f"Error I/O: {e}")
         except Exception as e:
@@ -1004,7 +1017,7 @@ class MainWindow(QMainWindow):
         hl = QHBoxLayout(hdr); hl.setContentsMargins(24,14,24,14)
         ta = QVBoxLayout(); ta.setSpacing(2)
         t = QLabel("BURNOUT 3: TAKEDOWN"); t.setObjectName("headerLabel"); ta.addWidget(t)
-        s = QLabel("CUSTOM MUSIC INJECTOR v9.5 — LINUX"); s.setObjectName("subtitleLabel"); ta.addWidget(s)
+        s = QLabel("CUSTOM MUSIC INJECTOR v9.6"); s.setObjectName("subtitleLabel"); ta.addWidget(s)
         hl.addLayout(ta); hl.addStretch()
         da = QVBoxLayout(); da.setSpacing(1)
         for name, key in [("ffmpeg","ffmpeg"),("7z","7z"),("gcc (encoder C)","gcc")]:
@@ -1018,9 +1031,9 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         lay.addWidget(self.tabs, 1)
         self.tabs.addTab(self._build_iso_tab(), "📀  ISO + FILESYSTEM")
-        self.tabs.addTab(self._build_tracks_tab(), "🎵  ASIGNAR TRACKS")
-        self.tabs.addTab(self._build_process_tab(), "🔧  PROCESAR")
-        self.tabs.addTab(self._build_info_tab(), "📖  GUÍA")
+        self.tabs.addTab(self._build_tracks_tab(), "🎵  ASSIGN TRACKS")
+        self.tabs.addTab(self._build_process_tab(), "🔧  PROCESS")
+        self.tabs.addTab(self._build_info_tab(), "📖  GUIDE")
 
         ft = QLabel("Burnout 3: Takedown™ — Electronic Arts · PS-ADPCM LLRR encoder · v9.5")
         ft.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1037,18 +1050,18 @@ class MainWindow(QMainWindow):
         tg = QGroupBox("Estructura conocida del ISO")
         tl = QVBoxLayout(tg)
         self.fs_tree = QTreeWidget()
-        self.fs_tree.setHeaderLabels(["Archivo / Carpeta","Descripción"])
+        self.fs_tree.setHeaderLabels(["File / Folder","Description"])
         self.fs_tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.fs_tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self._fill_tree()
         tl.addWidget(self.fs_tree)
         sp.addWidget(tg)
         # Info
-        ig = QGroupBox("Información del ISO cargado")
+        ig = QGroupBox("Loaded ISO information")
         il = QVBoxLayout(ig)
         self.iso_info = QTextEdit()
         self.iso_info.setReadOnly(True)
-        self.iso_info.setHtml('<div style="color:#666;font-style:italic">Arrastra o selecciona un ISO</div>')
+        self.iso_info.setHtml('<div style="color:#666;font-style:italic">Drag or select ISO</div>')
         il.addWidget(self.iso_info)
         sp.addWidget(ig)
         sp.setSizes([500,500])
@@ -1078,17 +1091,17 @@ class MainWindow(QMainWindow):
         self.iso_drop.set_iso_path(path)
         sz = os.path.getsize(path)/1048576
         self.iso_info.setHtml(f"""<div style="line-height:1.8">
-        <b style="color:#ff8c00">Archivo:</b> <span style="color:#4fc3f7">{os.path.basename(path)}</span><br>
-        <b style="color:#ff8c00">Tamaño:</b> {sz:.1f} MB<br>
-        <b style="color:#ff8c00">Ruta:</b> <span style="color:#888">{path}</span><br>
-        <b style="color:#ff8c00">Salida:</b> <span style="color:#888">{self.output_path}</span><br><br>
-        <b style="color:#ff8c00">Estructura de audio esperada:</b><br>
-        <span style="color:#69f0ae">Tracks/_EATRAX0.RWS</span> — Canciones 1-22<br>
-        <span style="color:#69f0ae">Tracks/_EATRAX1.RWS</span> — Canciones 23-40+<br><br>
-        <b style="color:#ff8c00">Formato interno:</b><br>
+        <b style="color:#ff8c00">File:</b> <span style="color:#4fc3f7">{os.path.basename(path)}</span><br>
+        <b style="color:#ff8c00">Size:</b> {sz:.1f} MB<br>
+        <b style="color:#ff8c00">Route:</b> <span style="color:#888">{path}</span><br>
+        <b style="color:#ff8c00">Output:</b> <span style="color:#888">{self.output_path}</span><br><br>
+        <b style="color:#ff8c00">Expected audio structure:</b><br>
+        <span style="color:#69f0ae">Tracks/_EATRAX0.RWS</span> — Songs 1-22<br>
+        <span style="color:#69f0ae">Tracks/_EATRAX1.RWS</span> — Songs 23-40+<br><br>
+        <b style="color:#ff8c00">Inner Format:</b><br>
         Contenedor: RenderWare Stream (.RWS)<br>
         Codec: PS-ADPCM · Chunks: 0x080D/0x080E/0x080F<br>
-        Headers: big-endian · Samples en clusters con padding<br>
+        Headers: big-endian · Samples in clusters with padding<br>
         </div>""")
         self._update_inject_btn()
         self.tabs.setCurrentIndex(1)
@@ -1096,16 +1109,16 @@ class MainWindow(QMainWindow):
     def _build_tracks_tab(self):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(16,16,16,16); lay.setSpacing(10)
         tb = QHBoxLayout()
-        for txt, fn in [("➕ Agregar audio",self._add_files),("📁 Agregar carpeta",self._add_folder),("⚡ Auto-asignar",self._auto_assign)]:
+        for txt, fn in [("➕ Add audio",self._add_files),("📁 Add folder",self._add_folder),("⚡ Auto-assign",self._auto_assign)]:
             b = QPushButton(txt); b.clicked.connect(fn); tb.addWidget(b)
         tb.addStretch()
-        bc = QPushButton("🗑 Limpiar"); bc.setObjectName("dangerBtn"); bc.clicked.connect(self._clear_all); tb.addWidget(bc)
+        bc = QPushButton("🗑 Clear"); bc.setObjectName("dangerBtn"); bc.clicked.connect(self._clear_all); tb.addWidget(bc)
         lay.addLayout(tb)
-        hint = QLabel("Arrastra archivos/carpetas de audio · Auto-detecta números en nombres de archivo")
+        hint = QLabel("Drag audio files/folders · Auto-detects numbers in filenames")
         hint.setStyleSheet("color:#555;font-size:11px"); lay.addWidget(hint)
 
         self.table = TrackTable(len(EA_TRAX_SONGS), 5)
-        self.table.setHorizontalHeaderLabels(["SLOT","CANCIÓN ORIGINAL","TU MÚSICA","TU TÍTULO (in-game)","ACCIÓN"])
+        self.table.setHorizontalHeaderLabels(["SLOT","ORIGINAL SONG","YOUR MUSIC","CUSTOM TITLE","ACTION"])
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.verticalHeader().setVisible(False)
@@ -1122,7 +1135,7 @@ class MainWindow(QMainWindow):
             if w_: self.table.setColumnWidth(i, w_)
         self._fill_table()
         lay.addWidget(self.table, 1)
-        self.lbl_assigned = QLabel("0 / 44 tracks asignados")
+        self.lbl_assigned = QLabel("{n} / 44 tracks assigned")
         self.lbl_assigned.setStyleSheet("color:#ff8c00;font-weight:bold"); lay.addWidget(self.lbl_assigned)
         return w
 
@@ -1144,7 +1157,7 @@ class MainWindow(QMainWindow):
             ct.setForeground(QColor("#4fc3f7"))
             self.table.setItem(row, 3, ct)
             # Col 4: Action button
-            b = QPushButton("Asignar"); b.setFixedHeight(26)
+            b = QPushButton("Assign"); b.setFixedHeight(26)
             b.setStyleSheet("font-size:10px;padding:2px 8px;border-radius:4px")
             b.clicked.connect(lambda _, s=song['id']: self._assign_single(s))
             self.table.setCellWidget(row, 4, b)
@@ -1163,7 +1176,7 @@ class MainWindow(QMainWindow):
             if ct and not ct.text().strip():
                 name = os.path.splitext(os.path.basename(fp))[0]
                 ct.setText(name)
-            b = QPushButton("Quitar"); b.setFixedHeight(26)
+            b = QPushButton("Remove"); b.setFixedHeight(26)
             b.setStyleSheet("font-size:10px;padding:2px 8px;border-radius:4px;background:rgba(255,50,50,0.15);color:#ff5252;border:1px solid rgba(255,50,50,0.3)")
             b.clicked.connect(lambda _, s=sid: self._remove(s))
             self.table.setCellWidget(row, 4, b)
@@ -1177,7 +1190,7 @@ class MainWindow(QMainWindow):
 
     def _update_inject_btn(self):
         n = len(self.assignments)
-        if hasattr(self,'lbl_assigned'): self.lbl_assigned.setText(f"{n} / 44 tracks asignados")
+        if hasattr(self,'lbl_assigned'): self.lbl_assigned.setText(f"{n} / 44 assigned tracks")
         if hasattr(self,'btn_inject'):
             self.btn_inject.setEnabled(
                 n > 0
@@ -1188,7 +1201,7 @@ class MainWindow(QMainWindow):
 
     def _assign_single(self, sid):
         exts = " *.".join(e.strip(".") for e in AUDIO_EXTENSIONS)
-        fs, _ = QFileDialog.getOpenFileNames(self, f"Audio para Slot {sid:02d}", "", f"Audio (*.{exts})")
+        fs, _ = QFileDialog.getOpenFileNames(self, f"Audio for Slot {sid:02d}", "", f"Audio (*.{exts})")
         if fs: self.assignments[sid]=fs[0]; self._upd_row(sid,fs[0]); self._update_inject_btn()
 
     def _remove(self, sid):
@@ -1205,7 +1218,7 @@ class MainWindow(QMainWindow):
             fs = sorted([os.path.join(d,f) for f in os.listdir(d)
                          if os.path.isfile(os.path.join(d,f)) and os.path.splitext(f)[1].lower() in AUDIO_EXTENSIONS])
             if fs: self._auto_files(fs)
-            else: QMessageBox.warning(self,"Sin audio","No se encontraron archivos de audio.")
+            else: QMessageBox.warning(self,"Without audio","No audio files were found.")
 
     def _on_drop(self, files): self._auto_files(sorted(files))
 
@@ -1250,13 +1263,13 @@ class MainWindow(QMainWindow):
 
     def _build_process_tab(self):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(24,24,24,24); lay.setSpacing(14)
-        sp = QLabel("Conversión: Tu audio → PS-ADPCM 32kHz Stereo (formato nativo PS2)\n"
-                     "⚡ Encoder C optimizado — 5 filtros × 3 shifts por bloque\n"
-                     "🎵 Fade out automático de 3s cuando la canción excede el slot")
+        sp = QLabel("Conversion: Your audio → PS-ADPCM 32kHz Stereo (native PS2 format)\n"
+                    "⚡ Optimized C encoder — tests 25 combos per block\n"
+                    "🎵 Auto fade-out on songs longer than the slot")
         sp.setStyleSheet("color:#888;font-size:11px;padding:12px;background:rgba(255,140,0,0.05);border:1px solid #222;border-radius:8px")
         lay.addWidget(sp)
 
-        self.btn_inject = QPushButton("🔥  INYECTAR MÚSICA PERSONALIZADA")
+        self.btn_inject = QPushButton("🔥  INJECT CUSTOM MUSIC")
         self.btn_inject.setObjectName("primaryBtn"); self.btn_inject.setMinimumHeight(48)
         self.btn_inject.clicked.connect(self._inject); self.btn_inject.setEnabled(False)
         lay.addWidget(self.btn_inject)
@@ -1268,14 +1281,14 @@ class MainWindow(QMainWindow):
         return w
 
     def _inject(self):
-        if not self.iso_path: QMessageBox.warning(self,"","Selecciona ISO primero."); return
-        if not self.assignments: QMessageBox.warning(self,"","Asigna tracks primero."); return
+        if not self.iso_path: QMessageBox.warning(self,"","Select ISO first."); return
+        if not self.assignments: QMessageBox.warning(self,"","Assign tracks first."); return
         if self.worker_thread and self.worker_thread.isRunning():
-            QMessageBox.warning(self,"","Ya hay un proceso en ejecución."); return
+            QMessageBox.warning(self,"","Already processing."); return
         if not os.path.isfile(self.iso_path):
-            QMessageBox.critical(self,"","El ISO seleccionado ya no existe."); return
+            QMessageBox.critical(self,"","Selected ISO no longer exists."); return
         out = self.output_path or os.path.splitext(self.iso_path)[0]+"_custom.iso"
-        self.btn_inject.setEnabled(False); self.btn_inject.setText("⏳ PROCESANDO...")
+        self.btn_inject.setEnabled(False); self.btn_inject.setText("⏳ PROCESSING...")
         self.pbar.setValue(0); self.log.clear()
         self.worker_thread = QThread()
         self.worker = InjectionWorker(self.iso_path, dict(self.assignments), out, None)
@@ -1304,10 +1317,10 @@ class MainWindow(QMainWindow):
         self.log.append(f'<span style="color:{c}">{safe}</span>')
 
     def _done(self, ok, msg):
-        self.btn_inject.setEnabled(True); self.btn_inject.setText("🔥  INYECTAR MÚSICA PERSONALIZADA")
+        self.btn_inject.setEnabled(True); self.btn_inject.setText("🔥  INJECT CUSTOM MUSIC")
         if ok:
-            self.pbar.setFormat("100% ¡Completado!")
-            QMessageBox.information(self,"¡Éxito!",f"{msg}\n\nCarga el ISO en PCSX2.")
+            self.pbar.setFormat("100% ¡Completed!")
+            QMessageBox.information(self,"Success!",f"{msg}\n\nLoad ISO in PCSX2.")
         else:
             self.pbar.setFormat("Error"); self.pbar.setValue(0)
             QMessageBox.critical(self,"Error",msg)
@@ -1315,35 +1328,37 @@ class MainWindow(QMainWindow):
     def _build_info_tab(self):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(24,24,24,24)
         i = QTextEdit(); i.setReadOnly(True)
+        # BUSCAR el contenido del HTML en _build_info_tab y reemplazar con:
         i.setHtml("""<div style="font-family:monospace;color:#ccc;line-height:1.8">
-        <h2 style="color:#ff4500">📖 Guía — v9.5</h2>
-        <h3 style="color:#ff8c00">Cómo usar</h3>
-        <p style="color:#aaa">1. Arrastra tu ISO de Burnout 3 (NTSC-U) a la pestaña ISO<br>
-        2. Ve a ASIGNAR TRACKS y arrastra tus canciones<br>
-        3. Click en INYECTAR en la pestaña PROCESAR<br>
-        4. Carga el ISO _custom.iso en PCSX2<br><br>
-        Formatos soportados: MP3, M4A, FLAC, OGG, WAV, OPUS, WMA, AAC</p>
+        <h2 style="color:#ff4500">📖 Guide — v9.6</h2>
+        <h3 style="color:#ff8c00">How to Use</h3>
+        <p style="color:#aaa">1. Drag your Burnout 3 ISO (NTSC-U) to the ISO tab<br>
+        2. Go to ASSIGN TRACKS and drag your songs<br>
+        3. Click INJECT in the PROCESS tab<br>
+        4. Load the _custom.iso in PCSX2<br><br>
+        Supported formats: MP3, M4A, FLAC, OGG, WAV, OPUS, WMA, AAC</p>
         <h3 style="color:#ff8c00">Audio</h3>
         <p style="color:#aaa">
         Codec: <b style="color:#4fc3f7">PS-ADPCM 4-bit</b> (PlayStation 2)<br>
-        Sample rate: <b>32000 Hz</b> · Canales: <b>Stereo</b><br>
-        Layout: <b>LLRR</b> en super-bloques de 8192 bytes<br>
+        Sample rate: <b>32000 Hz</b> · Channels: <b>Stereo</b><br>
+        Layout: <b>LLRR</b> in 8192-byte super-blocks<br>
         &nbsp;&nbsp;L[2048] L[2048] R[2048] R[2048]<br>
-        Nibbles: primer sample = LOW, segundo = HIGH<br>
-        Encoder: <b style="color:#69f0ae">C optimizado</b> — prueba 65 combinaciones/bloque<br>
-        Compresión: 3.5:1 (56 bytes PCM → 16 bytes ADPCM)</p>
-        <h3 style="color:#ff8c00">Estructura del ISO</h3>
+        Nibbles: first sample = LOW, second = HIGH<br>
+        Encoder: <b style="color:#69f0ae">Optimized C</b> — 25 combos/block<br>
+        Compression: 3.5:1 (56 bytes PCM → 16 bytes ADPCM)</p>
+        <h3 style="color:#ff8c00">ISO Structure</h3>
         <p style="color:#aaa"><code style="color:#69f0ae">
-        SLUS_210.50 → Ejecutable<br>
-        <b>TRACKS/_EATRAX0.RWS → Música 1-22</b><br>
-        <b>TRACKS/_EATRAX1.RWS → Música 23-44</b><br>
-        TRACKS/[maps]/ → Datos de pistas<br>
+        SLUS_210.50 → Executable<br>
+        <b>TRACKS/_EATRAX0.RWS → Music 1-22</b><br>
+        <b>TRACKS/_EATRAX1.RWS → Music 23-44</b><br>
+        TRACKS/[maps]/ → Track data<br>
         SOUNDS/ → SFX .RWS<br>FMV/ → Videos .PSS</code></p>
-        <h3 style="color:#ff8c00">Dependencias</h3>
+        <h3 style="color:#ff8c00">Dependencies</h3>
         <p style="color:#aaa"><code style="color:#69f0ae">
         <b>Arch:</b> sudo pacman -S ffmpeg p7zip gcc python-pyside6<br>
         <b>Ubuntu:</b> sudo apt install ffmpeg p7zip-full gcc<br>
-        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pip install PySide6</code></p>
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pip install PySide6<br>
+        <b>Windows:</b> Install Python, ffmpeg, 7zip, MinGW (gcc)</code></p>
         </div>""")
         lay.addWidget(i); return w
 
