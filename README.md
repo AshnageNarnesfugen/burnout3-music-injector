@@ -9,23 +9,6 @@
 
 Replace the EA Trax soundtrack with your own music. Supports MP3, FLAC, M4A, OGG, WAV, OPUS, and more. Features a full GUI with drag & drop, automatic PS-ADPCM encoding, and in-place ISO patching.
 
-## 🎬 Demo - Gameplay Footage
-
-[![Burnout 3 Custom Music Demo](https://img.youtube.com/vi/bScxPc_APYo/maxresdefault.jpg)](https://www.youtube.com/watch?v=bScxPc_APYo)
-
-*Click to watch gameplay with custom music injected*
-
-## 📸 UI Screenshots
-
-### ISO Tab
-![ISO Tab](screenshots/iso-injection.png)
-
-### Track Assignment
-![Track Assignment](screenshots/assign.png)
-
-### Processing
-![Processing](screenshots/process.png)
-
 ## ✨ Features
 
 - **44 track slots** — Replace any or all songs in the EA Trax playlist
@@ -36,12 +19,6 @@ Replace the EA Trax soundtrack with your own music. Supports MP3, FLAC, M4A, OGG
 - **In-place ISO patching** — No ISO rebuild needed, fast and safe
 - **Drag & drop GUI** — PySide6/Qt6 interface with dark theme
 - **Auto-detect** — Parses ISO9660 + RWS headers to find all tracks
-
-## 🎬 Demo
-
-[![Burnout 3 Custom Music Demo](https://img.youtube.com/vi/bScxPc_APYo/maxresdefault.jpg)](https://www.youtube.com/watch?v=bScxPc_APYo)
-
-*Click to watch gameplay with custom music injected*
 
 ## 🔧 Installation
 
@@ -101,7 +78,7 @@ RWS Container (0x080D) {
 ```
 
 ### LLRR Layout Discovery
-Through extensive reverse engineering, i discovered Burnout 3 uses an unusual stereo interleave:
+Through extensive reverse engineering, we discovered Burnout 3 uses an unusual stereo interleave:
 - **Not** standard L[2048] R[2048] alternating
 - **Actual**: L[2048] L[2048] R[2048] R[2048] in 8192-byte super-blocks
 - Confirmed by decoding original tracks with vgmstream and comparing energy patterns
@@ -123,7 +100,7 @@ This was verified by byte-comparison against decoded/re-encoded original tracks.
 
 Contributions welcome! Areas that need help:
 
-- **HostFS integration** — [Nehalem's HostFS patch](https://github.com/Nahelam/PCSX2-HostFS-Patches) could enable larger EATRAX files for full-length songs
+- **HostFS integration** — [Nahelam's HostFS patch](https://github.com/Nahelam/PCSX2-HostFS-Patches) could enable larger EATRAX files for full-length songs
 - **Song metadata** — Finding where artist/title strings are stored to allow custom names in the EA Trax UI
 - **PAL/JP support** — Adding support for European and Japanese ISO versions
 - **Cross-platform** — Windows/Mac support (PySide6 is cross-platform, C encoder needs platform builds)
@@ -131,7 +108,7 @@ Contributions welcome! Areas that need help:
 
 ## 🙏 Credits & Acknowledgments
 
-- **[Nehalem](https://github.com/Nahelam)** — [PS2-Game-Mods](https://github.com/Nahelam/PS2-Game-Mods) for Burnout 3 modding research and HostFS patches
+- **[Nahelam](https://github.com/Nahelam)** — [PS2-Game-Mods](https://github.com/Nahelam/PS2-Game-Mods) for Burnout 3 modding research and HostFS patches
 - **vgmstream** — For confirming the audio codec and sample rate
 - **EA / Criterion Games** — For making Burnout 3: Takedown, one of the greatest racing games ever
 

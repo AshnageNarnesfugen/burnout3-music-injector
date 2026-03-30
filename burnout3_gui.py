@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-BURNOUT 3: TAKEDOWN — Custom Music Injector v9.5
+BURNOUT 3: TAKEDOWN — Custom Music Injector v11.0
 Qt6 GUI (PySide6) — Linux Edition
 
 Features:
@@ -159,24 +159,15 @@ def _compile_c_encoder():
 
     if need_compile and os.path.isfile(c_path):
         try:
-            if sys.platform == 'win32':
-                so_path = os.path.join(script_dir, "psxenc.dll")
-                r = subprocess.run(
-                    ["gcc", "-O3", "-shared", "-o", so_path, c_path],
-                    capture_output=True, text=True, timeout=30
-                )
-            else:
-                r = subprocess.run(
-                    ["gcc", "-O3", "-shared", "-fPIC", "-o", so_path, c_path, "-lm"],
-                    capture_output=True, text=True, timeout=30
-                )
+            r = subprocess.run(
+                ["gcc", "-O3", "-shared", "-fPIC", "-o", so_path, c_path, "-lm"],
+                capture_output=True, text=True, timeout=30
+            )
             if r.returncode != 0:
                 return None
         except Exception:
             return None
 
-    if sys.platform == 'win32':
-        so_path = os.path.join(script_dir, "psxenc.dll")
     if os.path.isfile(so_path):
         try:
             lib = ctypes.CDLL(so_path)
@@ -449,7 +440,7 @@ class ISODropZone(QFrame):
         self.icon_lbl.setStyleSheet("font-size:36px;border:none")
         self.icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(self.icon_lbl)
-        self.text_lbl = QLabel("Drag your Burnout 3 Takedown ISO here\no click to search")
+        self.text_lbl = QLabel("Arrastra tu ISO de Burnout 3 aquí\no haz clic para buscar")
         self.text_lbl.setStyleSheet("color:#666;font-size:13px;border:none;font-weight:bold")
         self.text_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(self.text_lbl)
@@ -790,8 +781,6 @@ class InjectionWorker(QObject):
         tmp = None
         try:
             tmp = tempfile.mkdtemp(prefix="burnout3_")
-            total = max(len(self.assignments) + 2, 1)
-            step = 0
 
             if not os.path.isfile(self.iso_path):
                 raise Exception(f"ISO not found: {self.iso_path}")
@@ -800,28 +789,30 @@ class InjectionWorker(QObject):
                     raise Exception(f"Audio not found: {src}")
 
             iso_size = os.path.getsize(self.iso_path)
-
             out_dir = os.path.dirname(os.path.abspath(self.output_iso)) or '.'
             try:
                 usage = shutil.disk_usage(out_dir)
                 free = usage.free
             except (OSError, AttributeError):
                 free = float('inf')
-            if free < iso_size + 100*1048576:
+            if free < iso_size + 200*1048576:
                 raise Exception(
                     f"Not enough space: {free//1048576} MB free, "
-                    f"~{(iso_size+100*1048576)//1048576} MB needed"
+                    f"~{(iso_size+200*1048576)//1048576} MB needed"
                 )
 
-            # Step 1: Copy ISO
-            self.progress.emit(step/total, "Copying ISO...")
+            total_steps = len(self.assignments) * 2 + 4
+            step = 0
+
+            # ═══ STEP 1: Copy ISO ═══
+            self.progress.emit(step/total_steps, "Copying ISO...")
             self.log_line.emit("▶ Copying ISO for in-place patching")
             shutil.copy2(self.iso_path, self.output_iso)
             self.log_line.emit(f"✓ Copy: {os.path.basename(self.output_iso)}")
             step += 1
 
-            # Step 2: Read ISO and find EATRAX files
-            self.progress.emit(step/total, "Reading ISO and analyzing EATRAX...")
+            # ═══ STEP 2: Parse ISO ═══
+            self.progress.emit(step/total_steps, "Analyzing EATRAX...")
             self.log_line.emit("▶ Parsing ISO9660 + RWS containers")
 
             with open(self.output_iso, 'rb') as f:
@@ -832,139 +823,262 @@ class InjectionWorker(QObject):
                     self.log_line.emit(f"✓ Disc ID: {did} — {region}")
                     break
 
-            # Find _EATRAX0.RWS and _EATRAX1.RWS
+            # Parse both EATRAX files
             eatrax_info = {}
             for rws_name in ["_EATRAX0.RWS", "_EATRAX1.RWS"]:
                 offset, size = self._find_file_offset_iso9660(iso_data, rws_name)
                 if offset and size:
                     rws_slice = bytes(iso_data[offset:offset+size])
                     tracks, sr, ch = self._parse_rws_tracks(rws_slice)
-                    eatrax_info[rws_name] = (offset, size, tracks, sr, ch)
+                    hsize = struct.unpack_from('<I', rws_slice, 16)[0]
+                    eatrax_info[rws_name] = {
+                        'iso_offset': offset,
+                        'file_size': size,
+                        'tracks': tracks,
+                        'hsize': hsize,
+                        'data_payload_off': 24 + hsize + 12,  # after header + data chunk hdr
+                        'total_audio': sum(s for _, s in tracks),
+                    }
                     self.log_line.emit(
                         f"✓ {rws_name} @ 0x{offset:X} ({size/1048576:.1f} MB) "
                         f"— {len(tracks)} tracks"
                     )
-                    if tracks:
-                        sizes = [s for _, s in tracks]
-                        min_d = adpcm_slot_duration(min(sizes))
-                        max_d = adpcm_slot_duration(max(sizes))
-                        self.log_line.emit(
-                            f"  ↳ Duration per track: {min_d:.0f}s – {max_d:.0f}s"
-                        )
-                else:
-                    self.log_line.emit(f"⚠ {rws_name} Not found in iso")
 
             if not eatrax_info:
                 raise Exception("No EATRAX found in ISO")
 
-            # Build slot map
-            slot_map = {}
-            ea0 = eatrax_info.get("_EATRAX0.RWS")
-            ea1 = eatrax_info.get("_EATRAX1.RWS")
-
-            slot_id = 1
-            if ea0:
-                iso_off, _, tracks, sr, ch = ea0
-                for (trk_off_in_rws, trk_size) in tracks:
-                    slot_map[slot_id] = (iso_off + trk_off_in_rws, trk_size, sr, ch)
-                    slot_id += 1
-            if ea1:
-                iso_off, _, tracks, sr, ch = ea1
-                for (trk_off_in_rws, trk_size) in tracks:
-                    slot_map[slot_id] = (iso_off + trk_off_in_rws, trk_size, sr, ch)
-                    slot_id += 1
-
-            self.log_line.emit(f"✓ {len(slot_map)} mapped slots")
             step += 1
 
-            # Step 3: Convert and patch each assigned track
+            # ═══ STEP 3: Encode all assigned songs to ADPCM temp files ═══
+            self.log_line.emit("▶ Converting songs to PS-ADPCM...")
+
+            # Split assignments by EATRAX: slots 1-22 → EATRAX0, 23-44 → EATRAX1
+            ea0_assignments = {k: v for k, v in self.assignments.items() if k <= 22}
+            ea1_assignments = {k: v for k, v in self.assignments.items() if k > 22}
+
+            # Encode all songs first (no truncation!)
+            encoded = {}  # slot_id -> (adpcm_file_path, adpcm_size, src_name, duration)
+            for slot_id, source in sorted(self.assignments.items()):
+                src_name = os.path.basename(source)
+                self.progress.emit(step/total_steps, f"Converting {src_name}...")
+
+                temp_raw = os.path.join(tmp, f"t{slot_id:02d}.raw")
+                cv = subprocess.run([
+                    "ffmpeg", "-y", "-i", source,
+                    "-af", "lowpass=f=14000,aresample=resampler=soxr",
+                    "-f", "s16le", "-acodec", "pcm_s16le",
+                    "-ar", "32000", "-ac", "2", temp_raw
+                ], capture_output=True, text=True, timeout=300)
+
+                if cv.returncode != 0:
+                    self.log_line.emit(f"✗ Slot {slot_id:02d}: ffmpeg error")
+                    step += 1; continue
+                if not os.path.isfile(temp_raw) or os.path.getsize(temp_raw) == 0:
+                    self.log_line.emit(f"✗ Slot {slot_id:02d}: empty file")
+                    step += 1; continue
+
+                pcm_size = os.path.getsize(temp_raw)
+                adpcm_size = pcm_to_adpcm_size(open(temp_raw, 'rb').read(4))
+                # Recalculate properly: pcm_size bytes = pcm_size/2 samples total
+                n_samples = pcm_size // 2
+                n_per_ch = n_samples // 2
+                n_superblocks = (n_per_ch + 7167) // 7168
+                adpcm_size = n_superblocks * 8192
+
+                dur = adpcm_slot_duration(adpcm_size)
+                encoded[slot_id] = (temp_raw, adpcm_size, src_name, dur)
+                self.log_line.emit(f"  ✓ Slot {slot_id:02d}: {src_name} → {adpcm_size//1024}KB ({dur:.0f}s)")
+                step += 1
+
+            if not encoded:
+                raise Exception("No tracks were converted")
+
+            # ═══ STEP 4: Redistribute space and encode to ADPCM ═══
+            self.progress.emit(step/total_steps, "Building EATRAX...")
+            self.log_line.emit("▶ Redistributing track space and encoding")
+
             replaced = 0
             with open(self.output_iso, 'r+b') as iso_out:
-                for slot_id, source in sorted(self.assignments.items()):
-                    src_name = os.path.basename(source)
-
-                    if slot_id not in slot_map:
-                        self.log_line.emit(f"✗ Slot {slot_id:02d}: not mapped in EATRAX")
+                for eatrax_name, assignments, slot_start in [
+                    ("_EATRAX0.RWS", ea0_assignments, 1),
+                    ("_EATRAX1.RWS", ea1_assignments, 23),
+                ]:
+                    if eatrax_name not in eatrax_info or not assignments:
                         continue
 
-                    abs_off, slot_size, sr, ch = slot_map[slot_id]
-                    slot_dur = adpcm_slot_duration(slot_size)
+                    ea = eatrax_info[eatrax_name]
+                    orig_tracks = ea['tracks']
+                    n_orig = len(orig_tracks)
+                    available_audio = ea['total_audio']
 
-                    src_dur = probe_duration_seconds(source)
-                    dur_s = f"{src_dur:.1f}s" if src_dur else "?"
+                    # Calculate how much space assigned songs need
+                    assigned_need = {}
+                    for sid in sorted(assignments.keys()):
+                        if sid in encoded:
+                            _, asz, _, _ = encoded[sid]
+                            assigned_need[sid] = asz
 
-                    # Determine if we need fade out
-                    needs_fadeout = src_dur and src_dur > slot_dur
-                    fade_duration = 3  # seconds
+                    total_needed = sum(assigned_need.values())
 
-                    if needs_fadeout:
-                        self.log_line.emit(
-                            f"  ↳ {html_mod.escape(src_name)} ({dur_s}) → "
-                            f"truncated to {slot_dur:.0f}s with fade out"
-                        )
-                    elif src_dur:
-                        self.log_line.emit(
-                            f"  ↳ {html_mod.escape(src_name)} ({dur_s}) → fits completely ✓"
-                        )
+                    # Space for unassigned slots (keep original sizes)
+                    unassigned_slots = []
+                    for i in range(n_orig):
+                        sid = slot_start + i
+                        if sid not in assignments:
+                            unassigned_slots.append((sid, orig_tracks[i][1]))  # (slot_id, orig_size)
 
-                    self.progress.emit(step/total, f"Converting {src_name}...")
-                    temp_raw = os.path.join(tmp, f"t{slot_id:02d}.raw")
+                    total_unassigned = sum(s for _, s in unassigned_slots)
 
-                    # Build ffmpeg command with optional fade out
-                    ffmpeg_cmd = ["ffmpeg", "-y", "-i", source]
-                    if needs_fadeout:
-                        # Fade out starting 3 seconds before the slot duration limit
-                        fade_start = max(0, slot_dur - fade_duration)
-                        ffmpeg_cmd.extend([
-                            "-t", str(slot_dur),
-                            "-af", f"afade=t=out:st={fade_start:.1f}:d={fade_duration},lowpass=f=14000,aresample=resampler=soxr"
-                        ])
-                    else:
-                        ffmpeg_cmd.extend(["-af", "lowpass=f=14000,aresample=resampler=soxr"])
-
-                    ffmpeg_cmd.extend([
-                        "-f", "s16le", "-acodec", "pcm_s16le",
-                        "-ar", "32000", "-ac", "2", temp_raw
-                    ])
-
-                    cv = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=300)
-
-                    if cv.returncode != 0:
-                        self.log_line.emit(f"✗ Slot {slot_id:02d}: ffmpeg error")
-                        step += 1
-                        continue
-
-                    if not os.path.isfile(temp_raw) or os.path.getsize(temp_raw) == 0:
-                        self.log_line.emit(f"✗ Slot {slot_id:02d}: empty file")
-                        step += 1
-                        continue
-
-                    # Read PCM and encode to PS-ADPCM
-                    self.progress.emit(step/total, f"Encoding PS-ADPCM {src_name}...")
-                    with open(temp_raw, 'rb') as af:
-                        pcm_data = af.read()
-
-                    # Read original slot data for sizing
-                    iso_out.seek(abs_off)
-                    original_slot = iso_out.read(slot_size)
-
-                    audio = encode_psx_adpcm_to_slot(pcm_data, original_slot)
-
-                    # PATCH IN-PLACE
-                    iso_out.seek(abs_off)
-                    iso_out.write(audio)
-
-                    dur_encoded = adpcm_slot_duration(slot_size)
+                    space_for_custom = available_audio - total_unassigned
                     self.log_line.emit(
-                        f"✓ Slot {slot_id:02d}: {html_mod.escape(src_name)} → "
-                        f"0x{abs_off:X} ({slot_size//1024}KB, {dur_encoded:.0f}s)"
+                        f"  {eatrax_name}: {space_for_custom//1024}KB available for "
+                        f"{len(assigned_need)} custom tracks (need {total_needed//1024}KB)"
                     )
-                    replaced += 1
-                    step += 1
 
-                    # Clean temp file
-                    try: os.remove(temp_raw)
-                    except: pass
+                    # Check if songs fit. If not, truncate the longest ones with fade out
+                    if total_needed > space_for_custom:
+                        self.log_line.emit(f"  ⚠ Songs exceed space, applying fade-out truncation")
+                        # Sort by size descending and truncate largest first
+                        while total_needed > space_for_custom:
+                            biggest_sid = max(assigned_need, key=assigned_need.get)
+                            old_size = assigned_need[biggest_sid]
+                            # Calculate max size per remaining track
+                            other_need = total_needed - old_size
+                            max_for_this = space_for_custom - other_need
+                            if max_for_this < 8192:
+                                max_for_this = 8192
+                            new_size = (max_for_this // 8192) * 8192
+                            assigned_need[biggest_sid] = new_size
+                            total_needed = sum(assigned_need.values())
+
+                            # Re-encode with truncation + fade
+                            _, _, src_name, _ = encoded[biggest_sid]
+                            new_dur = adpcm_slot_duration(new_size)
+                            fade_dur = 3
+                            fade_start = max(0, new_dur - fade_dur)
+                            source = self.assignments[biggest_sid]
+                            temp_raw = os.path.join(tmp, f"t{biggest_sid:02d}_trunc.raw")
+                            subprocess.run([
+                                "ffmpeg", "-y", "-i", source,
+                                "-t", str(new_dur),
+                                "-af", f"afade=t=out:st={fade_start:.1f}:d={fade_dur},lowpass=f=14000,aresample=resampler=soxr",
+                                "-f", "s16le", "-acodec", "pcm_s16le",
+                                "-ar", "32000", "-ac", "2", temp_raw
+                            ], capture_output=True, text=True, timeout=300)
+                            encoded[biggest_sid] = (temp_raw, new_size, src_name, new_dur)
+                            self.log_line.emit(
+                                f"  ↳ Slot {biggest_sid:02d}: truncated to {new_dur:.0f}s with fade out"
+                            )
+
+                    # Now build the track layout: assigned slots get their custom size,
+                    # unassigned slots keep original size
+                    new_track_sizes = []
+                    new_track_data = []  # (slot_id, is_custom)
+
+                    for i in range(n_orig):
+                        sid = slot_start + i
+                        if sid in assigned_need:
+                            new_track_sizes.append(assigned_need[sid])
+                            new_track_data.append((sid, True))
+                        else:
+                            new_track_sizes.append(orig_tracks[i][1])
+                            new_track_data.append((sid, False))
+
+                    # Find the track table in the RWS header to patch it
+                    iso_out.seek(ea['iso_offset'])
+                    rws_header = bytearray(iso_out.read(24 + ea['hsize']))
+
+                    header_end = len(rws_header)
+                    ENTRY_SIZE = 32
+                    SIZE_WITHIN = 24
+                    OFF_WITHIN = 28
+
+                    found_table = None
+                    for scan in range(24, header_end - 32, 4):
+                        cs = struct.unpack_from('<I', rws_header, scan)[0]
+                        co = struct.unpack_from('<I', rws_header, scan + 4)[0]
+                        if co == 0 and 500000 < cs < 50000000:
+                            entry0_start = scan - SIZE_WITHIN
+                            if entry0_start < 24: continue
+                            e1s = struct.unpack_from('<I', rws_header, entry0_start + ENTRY_SIZE + SIZE_WITHIN)[0]
+                            e1o = struct.unpack_from('<I', rws_header, entry0_start + ENTRY_SIZE + OFF_WITHIN)[0]
+                            if e1o == cs and 500000 < e1s < 50000000:
+                                found_table = entry0_start
+                                break
+
+                    if found_table is None:
+                        self.log_line.emit(f"✗ {eatrax_name}: track table not found")
+                        continue
+
+                    # Patch track table with new sizes and offsets
+                    cumulative = 0
+                    for i in range(n_orig):
+                        entry_off = found_table + i * ENTRY_SIZE
+                        if entry_off + ENTRY_SIZE > header_end: break
+                        struct.pack_into('<I', rws_header, entry_off + SIZE_WITHIN, new_track_sizes[i])
+                        struct.pack_into('<I', rws_header, entry_off + OFF_WITHIN, cumulative)
+                        cumulative += new_track_sizes[i]
+
+                    # Update container size field
+                    new_total_audio = sum(new_track_sizes)
+                    new_container_payload = ea['hsize'] + 12 + new_total_audio
+                    struct.pack_into('<I', rws_header, 4, new_container_payload)
+
+                    # Pre-read ALL original track data before we overwrite anything
+                    orig_track_data = {}
+                    for i, (sid, is_custom) in enumerate(new_track_data):
+                        if not is_custom:
+                            orig_off, orig_size = orig_tracks[i]
+                            iso_out.seek(ea['iso_offset'] + orig_off)
+                            orig_track_data[i] = iso_out.read(orig_size)
+
+                    # Write patched header
+                    iso_out.seek(ea['iso_offset'])
+                    iso_out.write(rws_header)
+
+                    # Write audio data chunk header with new size
+                    iso_out.write(struct.pack('<III', 0x080F, new_total_audio, 0x1C020009))
+
+                    # Write track audio data in order
+                    for i, (sid, is_custom) in enumerate(new_track_data):
+                        self.progress.emit(step/total_steps, f"Writing track {sid}...")
+
+                        if is_custom and sid in encoded:
+                            temp_raw, adpcm_size, src_name, dur = encoded[sid]
+
+                            # Read PCM and encode
+                            with open(temp_raw, 'rb') as af:
+                                pcm_data = af.read()
+
+                            target_size = new_track_sizes[i]
+                            audio = encode_psx_adpcm_sized(pcm_data, target_size)
+                            iso_out.write(audio)
+
+                            self.log_line.emit(
+                                f"✓ Slot {sid:02d}: {html_mod.escape(src_name)} → "
+                                f"{target_size//1024}KB ({adpcm_slot_duration(target_size):.0f}s)"
+                            )
+                            replaced += 1
+                            step += 1
+                        else:
+                            # Write pre-read original track data
+                            iso_out.write(orig_track_data[i])
+
+                    # Zero-pad any remaining space
+                    written = 24 + ea['hsize'] + 12 + new_total_audio
+                    remaining = ea['file_size'] - written
+                    if remaining > 0:
+                        zero_chunk = b'\x00' * min(1048576, remaining)
+                        w = 0
+                        while w < remaining:
+                            to_write = min(len(zero_chunk), remaining - w)
+                            iso_out.write(zero_chunk[:to_write])
+                            w += to_write
+
+                    self.log_line.emit(
+                        f"✓ {eatrax_name}: {len(assignments)} custom tracks, "
+                        f"{new_total_audio/1048576:.1f}MB used of {available_audio/1048576:.1f}MB"
+                    )
 
             if replaced == 0:
                 if os.path.isfile(self.output_iso):
@@ -972,14 +1086,14 @@ class InjectionWorker(QObject):
                 raise Exception("No tracks were patched")
 
             self.progress.emit(1.0, "Completed!")
-            self.log_line.emit(f"✓ {replaced} tracks patched in-place in ISO")
+            self.log_line.emit(f"✓ {replaced} tracks patched — full-length songs!")
             self.log_line.emit(f"✓ {self.output_iso}")
             self.finished.emit(True, f"Done! {replaced} tracks.\n{self.output_iso}")
 
         except subprocess.TimeoutExpired:
             self.finished.emit(False, "Timeout: ffmpeg took too long.")
         except OSError as e:
-            self.finished.emit(False, f"Error I/O: {e}")
+            self.finished.emit(False, f"I/O Error: {e}")
         except Exception as e:
             self.finished.emit(False, str(e))
         finally:
@@ -991,7 +1105,7 @@ class InjectionWorker(QObject):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Burnout 3: Takedown — Custom Music Injector v9.5")
+        self.setWindowTitle("Burnout 3: Takedown — Custom Music Injector v11.0")
         self.setMinimumSize(1050, 750)
         self.resize(1150, 850)
         self.iso_path = None
@@ -1017,7 +1131,7 @@ class MainWindow(QMainWindow):
         hl = QHBoxLayout(hdr); hl.setContentsMargins(24,14,24,14)
         ta = QVBoxLayout(); ta.setSpacing(2)
         t = QLabel("BURNOUT 3: TAKEDOWN"); t.setObjectName("headerLabel"); ta.addWidget(t)
-        s = QLabel("CUSTOM MUSIC INJECTOR v9.6"); s.setObjectName("subtitleLabel"); ta.addWidget(s)
+        s = QLabel("CUSTOM MUSIC INJECTOR v11.0 — LINUX"); s.setObjectName("subtitleLabel"); ta.addWidget(s)
         hl.addLayout(ta); hl.addStretch()
         da = QVBoxLayout(); da.setSpacing(1)
         for name, key in [("ffmpeg","ffmpeg"),("7z","7z"),("gcc (encoder C)","gcc")]:
@@ -1031,11 +1145,11 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         lay.addWidget(self.tabs, 1)
         self.tabs.addTab(self._build_iso_tab(), "📀  ISO + FILESYSTEM")
-        self.tabs.addTab(self._build_tracks_tab(), "🎵  ASSIGN TRACKS")
-        self.tabs.addTab(self._build_process_tab(), "🔧  PROCESS")
-        self.tabs.addTab(self._build_info_tab(), "📖  GUIDE")
+        self.tabs.addTab(self._build_tracks_tab(), "🎵  ASIGNAR TRACKS")
+        self.tabs.addTab(self._build_process_tab(), "🔧  PROCESAR")
+        self.tabs.addTab(self._build_info_tab(), "📖  GUÍA")
 
-        ft = QLabel("Burnout 3: Takedown™ — Electronic Arts · PS-ADPCM LLRR encoder · v9.5")
+        ft = QLabel("Burnout 3: Takedown™ — Electronic Arts · PS-ADPCM LLRR encoder · v11.0")
         ft.setAlignment(Qt.AlignmentFlag.AlignCenter)
         ft.setStyleSheet("background:#0a0a0a;color:#333;padding:8px;font-size:9px;letter-spacing:1px;border-top:1px solid #1a1a1a")
         lay.addWidget(ft)
@@ -1050,18 +1164,18 @@ class MainWindow(QMainWindow):
         tg = QGroupBox("Estructura conocida del ISO")
         tl = QVBoxLayout(tg)
         self.fs_tree = QTreeWidget()
-        self.fs_tree.setHeaderLabels(["File / Folder","Description"])
+        self.fs_tree.setHeaderLabels(["Archivo / Carpeta","Descripción"])
         self.fs_tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.fs_tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self._fill_tree()
         tl.addWidget(self.fs_tree)
         sp.addWidget(tg)
         # Info
-        ig = QGroupBox("Loaded ISO information")
+        ig = QGroupBox("Información del ISO cargado")
         il = QVBoxLayout(ig)
         self.iso_info = QTextEdit()
         self.iso_info.setReadOnly(True)
-        self.iso_info.setHtml('<div style="color:#666;font-style:italic">Drag or select ISO</div>')
+        self.iso_info.setHtml('<div style="color:#666;font-style:italic">Arrastra o selecciona un ISO</div>')
         il.addWidget(self.iso_info)
         sp.addWidget(ig)
         sp.setSizes([500,500])
@@ -1091,17 +1205,17 @@ class MainWindow(QMainWindow):
         self.iso_drop.set_iso_path(path)
         sz = os.path.getsize(path)/1048576
         self.iso_info.setHtml(f"""<div style="line-height:1.8">
-        <b style="color:#ff8c00">File:</b> <span style="color:#4fc3f7">{os.path.basename(path)}</span><br>
-        <b style="color:#ff8c00">Size:</b> {sz:.1f} MB<br>
-        <b style="color:#ff8c00">Route:</b> <span style="color:#888">{path}</span><br>
-        <b style="color:#ff8c00">Output:</b> <span style="color:#888">{self.output_path}</span><br><br>
-        <b style="color:#ff8c00">Expected audio structure:</b><br>
-        <span style="color:#69f0ae">Tracks/_EATRAX0.RWS</span> — Songs 1-22<br>
-        <span style="color:#69f0ae">Tracks/_EATRAX1.RWS</span> — Songs 23-40+<br><br>
-        <b style="color:#ff8c00">Inner Format:</b><br>
+        <b style="color:#ff8c00">Archivo:</b> <span style="color:#4fc3f7">{os.path.basename(path)}</span><br>
+        <b style="color:#ff8c00">Tamaño:</b> {sz:.1f} MB<br>
+        <b style="color:#ff8c00">Ruta:</b> <span style="color:#888">{path}</span><br>
+        <b style="color:#ff8c00">Salida:</b> <span style="color:#888">{self.output_path}</span><br><br>
+        <b style="color:#ff8c00">Estructura de audio esperada:</b><br>
+        <span style="color:#69f0ae">Tracks/_EATRAX0.RWS</span> — Canciones 1-22<br>
+        <span style="color:#69f0ae">Tracks/_EATRAX1.RWS</span> — Canciones 23-40+<br><br>
+        <b style="color:#ff8c00">Formato interno:</b><br>
         Contenedor: RenderWare Stream (.RWS)<br>
         Codec: PS-ADPCM · Chunks: 0x080D/0x080E/0x080F<br>
-        Headers: big-endian · Samples in clusters with padding<br>
+        Headers: big-endian · Samples en clusters con padding<br>
         </div>""")
         self._update_inject_btn()
         self.tabs.setCurrentIndex(1)
@@ -1109,16 +1223,16 @@ class MainWindow(QMainWindow):
     def _build_tracks_tab(self):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(16,16,16,16); lay.setSpacing(10)
         tb = QHBoxLayout()
-        for txt, fn in [("➕ Add audio",self._add_files),("📁 Add folder",self._add_folder),("⚡ Auto-assign",self._auto_assign)]:
+        for txt, fn in [("➕ Agregar audio",self._add_files),("📁 Agregar carpeta",self._add_folder),("⚡ Auto-asignar",self._auto_assign)]:
             b = QPushButton(txt); b.clicked.connect(fn); tb.addWidget(b)
         tb.addStretch()
-        bc = QPushButton("🗑 Clear"); bc.setObjectName("dangerBtn"); bc.clicked.connect(self._clear_all); tb.addWidget(bc)
+        bc = QPushButton("🗑 Limpiar"); bc.setObjectName("dangerBtn"); bc.clicked.connect(self._clear_all); tb.addWidget(bc)
         lay.addLayout(tb)
-        hint = QLabel("Drag audio files/folders · Auto-detects numbers in filenames")
+        hint = QLabel("Arrastra archivos/carpetas de audio · Auto-detecta números en nombres de archivo")
         hint.setStyleSheet("color:#555;font-size:11px"); lay.addWidget(hint)
 
         self.table = TrackTable(len(EA_TRAX_SONGS), 5)
-        self.table.setHorizontalHeaderLabels(["SLOT","ORIGINAL SONG","YOUR MUSIC","CUSTOM TITLE","ACTION"])
+        self.table.setHorizontalHeaderLabels(["SLOT","CANCIÓN ORIGINAL","TU MÚSICA","TU TÍTULO (in-game)","ACCIÓN"])
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.verticalHeader().setVisible(False)
@@ -1135,7 +1249,7 @@ class MainWindow(QMainWindow):
             if w_: self.table.setColumnWidth(i, w_)
         self._fill_table()
         lay.addWidget(self.table, 1)
-        self.lbl_assigned = QLabel("{n} / 44 tracks assigned")
+        self.lbl_assigned = QLabel("0 / 44 tracks asignados")
         self.lbl_assigned.setStyleSheet("color:#ff8c00;font-weight:bold"); lay.addWidget(self.lbl_assigned)
         return w
 
@@ -1157,7 +1271,7 @@ class MainWindow(QMainWindow):
             ct.setForeground(QColor("#4fc3f7"))
             self.table.setItem(row, 3, ct)
             # Col 4: Action button
-            b = QPushButton("Assign"); b.setFixedHeight(26)
+            b = QPushButton("Asignar"); b.setFixedHeight(26)
             b.setStyleSheet("font-size:10px;padding:2px 8px;border-radius:4px")
             b.clicked.connect(lambda _, s=song['id']: self._assign_single(s))
             self.table.setCellWidget(row, 4, b)
@@ -1176,7 +1290,7 @@ class MainWindow(QMainWindow):
             if ct and not ct.text().strip():
                 name = os.path.splitext(os.path.basename(fp))[0]
                 ct.setText(name)
-            b = QPushButton("Remove"); b.setFixedHeight(26)
+            b = QPushButton("Quitar"); b.setFixedHeight(26)
             b.setStyleSheet("font-size:10px;padding:2px 8px;border-radius:4px;background:rgba(255,50,50,0.15);color:#ff5252;border:1px solid rgba(255,50,50,0.3)")
             b.clicked.connect(lambda _, s=sid: self._remove(s))
             self.table.setCellWidget(row, 4, b)
@@ -1190,7 +1304,7 @@ class MainWindow(QMainWindow):
 
     def _update_inject_btn(self):
         n = len(self.assignments)
-        if hasattr(self,'lbl_assigned'): self.lbl_assigned.setText(f"{n} / 44 assigned tracks")
+        if hasattr(self,'lbl_assigned'): self.lbl_assigned.setText(f"{n} / 44 tracks asignados")
         if hasattr(self,'btn_inject'):
             self.btn_inject.setEnabled(
                 n > 0
@@ -1201,7 +1315,7 @@ class MainWindow(QMainWindow):
 
     def _assign_single(self, sid):
         exts = " *.".join(e.strip(".") for e in AUDIO_EXTENSIONS)
-        fs, _ = QFileDialog.getOpenFileNames(self, f"Audio for Slot {sid:02d}", "", f"Audio (*.{exts})")
+        fs, _ = QFileDialog.getOpenFileNames(self, f"Audio para Slot {sid:02d}", "", f"Audio (*.{exts})")
         if fs: self.assignments[sid]=fs[0]; self._upd_row(sid,fs[0]); self._update_inject_btn()
 
     def _remove(self, sid):
@@ -1218,7 +1332,7 @@ class MainWindow(QMainWindow):
             fs = sorted([os.path.join(d,f) for f in os.listdir(d)
                          if os.path.isfile(os.path.join(d,f)) and os.path.splitext(f)[1].lower() in AUDIO_EXTENSIONS])
             if fs: self._auto_files(fs)
-            else: QMessageBox.warning(self,"Without audio","No audio files were found.")
+            else: QMessageBox.warning(self,"Sin audio","No se encontraron archivos de audio.")
 
     def _on_drop(self, files): self._auto_files(sorted(files))
 
@@ -1263,13 +1377,13 @@ class MainWindow(QMainWindow):
 
     def _build_process_tab(self):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(24,24,24,24); lay.setSpacing(14)
-        sp = QLabel("Conversion: Your audio → PS-ADPCM 32kHz Stereo (native PS2 format)\n"
-                    "⚡ Optimized C encoder — tests 25 combos per block\n"
-                    "🎵 Auto fade-out on songs longer than the slot")
+        sp = QLabel("Conversión: Tu audio → PS-ADPCM 32kHz Stereo (formato nativo PS2)\n"
+                     "⚡ Encoder C optimizado — 5 filtros × 3 shifts por bloque\n"
+                     "🎵 Fade out automático de 3s cuando la canción excede el slot")
         sp.setStyleSheet("color:#888;font-size:11px;padding:12px;background:rgba(255,140,0,0.05);border:1px solid #222;border-radius:8px")
         lay.addWidget(sp)
 
-        self.btn_inject = QPushButton("🔥  INJECT CUSTOM MUSIC")
+        self.btn_inject = QPushButton("🔥  INYECTAR MÚSICA PERSONALIZADA")
         self.btn_inject.setObjectName("primaryBtn"); self.btn_inject.setMinimumHeight(48)
         self.btn_inject.clicked.connect(self._inject); self.btn_inject.setEnabled(False)
         lay.addWidget(self.btn_inject)
@@ -1281,14 +1395,14 @@ class MainWindow(QMainWindow):
         return w
 
     def _inject(self):
-        if not self.iso_path: QMessageBox.warning(self,"","Select ISO first."); return
-        if not self.assignments: QMessageBox.warning(self,"","Assign tracks first."); return
+        if not self.iso_path: QMessageBox.warning(self,"","Selecciona ISO primero."); return
+        if not self.assignments: QMessageBox.warning(self,"","Asigna tracks primero."); return
         if self.worker_thread and self.worker_thread.isRunning():
-            QMessageBox.warning(self,"","Already processing."); return
+            QMessageBox.warning(self,"","Ya hay un proceso en ejecución."); return
         if not os.path.isfile(self.iso_path):
-            QMessageBox.critical(self,"","Selected ISO no longer exists."); return
+            QMessageBox.critical(self,"","El ISO seleccionado ya no existe."); return
         out = self.output_path or os.path.splitext(self.iso_path)[0]+"_custom.iso"
-        self.btn_inject.setEnabled(False); self.btn_inject.setText("⏳ PROCESSING...")
+        self.btn_inject.setEnabled(False); self.btn_inject.setText("⏳ PROCESANDO...")
         self.pbar.setValue(0); self.log.clear()
         self.worker_thread = QThread()
         self.worker = InjectionWorker(self.iso_path, dict(self.assignments), out, None)
@@ -1317,10 +1431,10 @@ class MainWindow(QMainWindow):
         self.log.append(f'<span style="color:{c}">{safe}</span>')
 
     def _done(self, ok, msg):
-        self.btn_inject.setEnabled(True); self.btn_inject.setText("🔥  INJECT CUSTOM MUSIC")
+        self.btn_inject.setEnabled(True); self.btn_inject.setText("🔥  INYECTAR MÚSICA PERSONALIZADA")
         if ok:
-            self.pbar.setFormat("100% ¡Completed!")
-            QMessageBox.information(self,"Success!",f"{msg}\n\nLoad ISO in PCSX2.")
+            self.pbar.setFormat("100% ¡Completado!")
+            QMessageBox.information(self,"¡Éxito!",f"{msg}\n\nCarga el ISO en PCSX2.")
         else:
             self.pbar.setFormat("Error"); self.pbar.setValue(0)
             QMessageBox.critical(self,"Error",msg)
@@ -1328,37 +1442,35 @@ class MainWindow(QMainWindow):
     def _build_info_tab(self):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(24,24,24,24)
         i = QTextEdit(); i.setReadOnly(True)
-        # BUSCAR el contenido del HTML en _build_info_tab y reemplazar con:
         i.setHtml("""<div style="font-family:monospace;color:#ccc;line-height:1.8">
-        <h2 style="color:#ff4500">📖 Guide — v9.6</h2>
-        <h3 style="color:#ff8c00">How to Use</h3>
-        <p style="color:#aaa">1. Drag your Burnout 3 ISO (NTSC-U) to the ISO tab<br>
-        2. Go to ASSIGN TRACKS and drag your songs<br>
-        3. Click INJECT in the PROCESS tab<br>
-        4. Load the _custom.iso in PCSX2<br><br>
-        Supported formats: MP3, M4A, FLAC, OGG, WAV, OPUS, WMA, AAC</p>
+        <h2 style="color:#ff4500">📖 Guía — v11.0</h2>
+        <h3 style="color:#ff8c00">Cómo usar</h3>
+        <p style="color:#aaa">1. Arrastra tu ISO de Burnout 3 (NTSC-U) a la pestaña ISO<br>
+        2. Ve a ASIGNAR TRACKS y arrastra tus canciones<br>
+        3. Click en INYECTAR en la pestaña PROCESAR<br>
+        4. Carga el ISO _custom.iso en PCSX2<br><br>
+        Formatos soportados: MP3, M4A, FLAC, OGG, WAV, OPUS, WMA, AAC</p>
         <h3 style="color:#ff8c00">Audio</h3>
         <p style="color:#aaa">
         Codec: <b style="color:#4fc3f7">PS-ADPCM 4-bit</b> (PlayStation 2)<br>
-        Sample rate: <b>32000 Hz</b> · Channels: <b>Stereo</b><br>
-        Layout: <b>LLRR</b> in 8192-byte super-blocks<br>
+        Sample rate: <b>32000 Hz</b> · Canales: <b>Stereo</b><br>
+        Layout: <b>LLRR</b> en super-bloques de 8192 bytes<br>
         &nbsp;&nbsp;L[2048] L[2048] R[2048] R[2048]<br>
-        Nibbles: first sample = LOW, second = HIGH<br>
-        Encoder: <b style="color:#69f0ae">Optimized C</b> — 25 combos/block<br>
-        Compression: 3.5:1 (56 bytes PCM → 16 bytes ADPCM)</p>
-        <h3 style="color:#ff8c00">ISO Structure</h3>
+        Nibbles: primer sample = LOW, segundo = HIGH<br>
+        Encoder: <b style="color:#69f0ae">C optimizado</b> — prueba 65 combinaciones/bloque<br>
+        Compresión: 3.5:1 (56 bytes PCM → 16 bytes ADPCM)</p>
+        <h3 style="color:#ff8c00">Estructura del ISO</h3>
         <p style="color:#aaa"><code style="color:#69f0ae">
-        SLUS_210.50 → Executable<br>
-        <b>TRACKS/_EATRAX0.RWS → Music 1-22</b><br>
-        <b>TRACKS/_EATRAX1.RWS → Music 23-44</b><br>
-        TRACKS/[maps]/ → Track data<br>
+        SLUS_210.50 → Ejecutable<br>
+        <b>TRACKS/_EATRAX0.RWS → Música 1-22</b><br>
+        <b>TRACKS/_EATRAX1.RWS → Música 23-44</b><br>
+        TRACKS/[maps]/ → Datos de pistas<br>
         SOUNDS/ → SFX .RWS<br>FMV/ → Videos .PSS</code></p>
-        <h3 style="color:#ff8c00">Dependencies</h3>
+        <h3 style="color:#ff8c00">Dependencias</h3>
         <p style="color:#aaa"><code style="color:#69f0ae">
         <b>Arch:</b> sudo pacman -S ffmpeg p7zip gcc python-pyside6<br>
         <b>Ubuntu:</b> sudo apt install ffmpeg p7zip-full gcc<br>
-        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pip install PySide6<br>
-        <b>Windows:</b> Install Python, ffmpeg, 7zip, MinGW (gcc)</code></p>
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pip install PySide6</code></p>
         </div>""")
         lay.addWidget(i); return w
 
