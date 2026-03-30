@@ -935,29 +935,44 @@ class InjectionWorker(QObject):
                         f"{len(assigned_need)} custom tracks (need {total_needed//1024}KB)"
                     )
 
-                    # Check if songs fit. If not, truncate the longest ones with fade out
+                    # Check if songs fit. If not, scale all songs proportionally with fade out
                     if total_needed > space_for_custom:
-                        self.log_line.emit(f"  ⚠ Songs exceed space, applying fade-out truncation")
-                        # Sort by size descending and truncate largest first
+                        overflow = total_needed - space_for_custom
+                        self.log_line.emit(
+                            f"  ⚠ Songs exceed space by {overflow//1024}KB, scaling down proportionally"
+                        )
+                        # Scale factor: how much of each song we can keep
+                        scale = space_for_custom / total_needed
+                        
+                        for sid in sorted(assigned_need.keys()):
+                            orig_size = assigned_need[sid]
+                            new_size = int(orig_size * scale)
+                            new_size = (new_size // 8192) * 8192  # align to super-block
+                            if new_size < 8192:
+                                new_size = 8192
+                            assigned_need[sid] = new_size
+                        
+                        # Fine-tune: if we're still over, trim the largest one by one
+                        total_needed = sum(assigned_need.values())
                         while total_needed > space_for_custom:
                             biggest_sid = max(assigned_need, key=assigned_need.get)
-                            old_size = assigned_need[biggest_sid]
-                            # Calculate max size per remaining track
-                            other_need = total_needed - old_size
-                            max_for_this = space_for_custom - other_need
-                            if max_for_this < 8192:
-                                max_for_this = 8192
-                            new_size = (max_for_this // 8192) * 8192
-                            assigned_need[biggest_sid] = new_size
+                            assigned_need[biggest_sid] -= 8192
+                            if assigned_need[biggest_sid] < 8192:
+                                assigned_need[biggest_sid] = 8192
                             total_needed = sum(assigned_need.values())
-
-                            # Re-encode with truncation + fade
-                            _, _, src_name, _ = encoded[biggest_sid]
+                        
+                        # Re-encode truncated songs with fade out
+                        for sid in sorted(assigned_need.keys()):
+                            _, orig_adpcm_size, src_name, orig_dur = encoded[sid]
+                            new_size = assigned_need[sid]
+                            if new_size >= orig_adpcm_size:
+                                continue  # no truncation needed
+                            
                             new_dur = adpcm_slot_duration(new_size)
                             fade_dur = 3
                             fade_start = max(0, new_dur - fade_dur)
-                            source = self.assignments[biggest_sid]
-                            temp_raw = os.path.join(tmp, f"t{biggest_sid:02d}_trunc.raw")
+                            source = self.assignments[sid]
+                            temp_raw = os.path.join(tmp, f"t{sid:02d}_trunc.raw")
                             subprocess.run([
                                 "ffmpeg", "-y", "-i", source,
                                 "-t", str(new_dur),
@@ -965,9 +980,9 @@ class InjectionWorker(QObject):
                                 "-f", "s16le", "-acodec", "pcm_s16le",
                                 "-ar", "32000", "-ac", "2", temp_raw
                             ], capture_output=True, text=True, timeout=300)
-                            encoded[biggest_sid] = (temp_raw, new_size, src_name, new_dur)
+                            encoded[sid] = (temp_raw, new_size, src_name, new_dur)
                             self.log_line.emit(
-                                f"  ↳ Slot {biggest_sid:02d}: truncated to {new_dur:.0f}s with fade out"
+                                f"  ↳ Slot {sid:02d}: {src_name} scaled to {new_dur:.0f}s ({new_size//1024}KB)"
                             )
 
                     # Now build the track layout: assigned slots get their custom size,
