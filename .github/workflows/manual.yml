@@ -1,0 +1,81 @@
+name: Build Executables
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install PySide6 pyinstaller numpy
+
+      - name: Build Linux executable
+        run: |
+          pyinstaller --onefile \
+            --name "burnout3-music-injector" \
+            --windowed \
+            --add-data "psxadpcm.c:." \
+            --hidden-import "PySide6.QtCore" \
+            --hidden-import "PySide6.QtGui" \
+            --hidden-import "PySide6.QtWidgets" \
+            burnout3_gui.py
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: burnout3-music-injector-linux
+          path: dist/burnout3-music-injector
+
+      - name: Upload to Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/burnout3-music-injector
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install PySide6 pyinstaller numpy
+
+      - name: Build Windows executable
+        run: |
+          pyinstaller --onefile `
+            --name "burnout3-music-injector" `
+            --windowed `
+            --add-data "psxadpcm.c;." `
+            --hidden-import "PySide6.QtCore" `
+            --hidden-import "PySide6.QtGui" `
+            --hidden-import "PySide6.QtWidgets" `
+            burnout3_gui.py
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: burnout3-music-injector-windows
+          path: dist/burnout3-music-injector.exe
+
+      - name: Upload to Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/burnout3-music-injector.exe
