@@ -46,17 +46,17 @@ Replace the EA Trax soundtrack with your own music. Supports MP3, FLAC, M4A, OGG
 
 ### Arch Linux
 ```bash
-sudo pacman -S ffmpeg p7zip gcc python-pyside6
+sudo pacman -S ffmpeg gcc python-pyside6
 ```
 
 ### Ubuntu / Debian
 ```bash
-sudo apt install ffmpeg p7zip-full gcc python3-pip
+sudo apt install ffmpeg gcc python3-pip
 pip install PySide6
 ```
 
 ### Windows
-Install [Python](https://python.org), [ffmpeg](https://ffmpeg.org/download.html), [7-Zip](https://7-zip.org), and [MinGW](https://www.mingw-w64.org/) (for gcc). Then:
+Install [Python](https://python.org), [ffmpeg](https://ffmpeg.org/download.html) and [MinGW](https://www.mingw-w64.org/) (for gcc). Then:
 ```bash
 pip install PySide6
 ```
