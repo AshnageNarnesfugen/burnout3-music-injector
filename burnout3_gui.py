@@ -809,113 +809,122 @@ class InjectionWorker(QObject):
         return tracks, sample_rate, num_channels
 
     def _patch_globalus_bin(self, output_iso, iso_data, metadata):
-        """Patch song title/artist/album strings in DATA/GLOBALUS.BIN inside the ISO.
-        Strings are UTF-16LE, null-terminated.
-        
-        String layout (from 0xB700 region):
-          Indices 0-2: UI strings ("PLAY TRACKS RANDOMLY", etc.)
-          Index 3+: Music strings in groups of 3 per song
-            Group for slot N: base = 3 + (N-1)*3
-              base+0 = Title
-              base+1 = Album  
-              base+2 = Artist
-          Game displays: Artist (line 1), Title (line 2), Album (line 3)
-        """
+        """Patch song names with DYNAMIC string redistribution.
+        The game uses string TABLE INDICES (not byte offsets), so we can freely
+        resize strings as long as total fits within the fixed region."""
         offset, size = self._find_file_offset_iso9660(iso_data, "GLOBALUS.BIN")
         if not offset or not size:
-            self.log_line.emit("  ⚠ GLOBALUS.BIN not found in ISO, skipping name patching")
+            self.log_line.emit("  ⚠ GLOBALUS.BIN not found, skipping name patching")
             return
 
         with open(output_iso, 'r+b') as f:
             f.seek(offset)
             gdata = bytearray(f.read(size))
 
-        # Parse all UTF-16LE strings starting from 0xB700
-        string_table = []  # [(offset_in_gdata, text, byte_length)]
-        pos = 0xB700
-        while pos < min(len(gdata), 0xD000):
-            while pos < len(gdata) - 1 and gdata[pos] == 0 and gdata[pos+1] == 0:
+        def parse_strings(d, start, end):
+            table = []
+            pos = start
+            while pos < min(len(d), end):
+                while pos < len(d)-1 and d[pos]==0 and d[pos+1]==0:
+                    pos += 2
+                if pos >= min(len(d), end): break
+                s_start = pos
+                while pos < len(d)-1:
+                    if d[pos]==0 and d[pos+1]==0: break
+                    pos += 2
+                text = d[s_start:pos].decode('utf-16-le', errors='replace')
+                table.append((s_start, text, pos - s_start))
                 pos += 2
-            if pos >= min(len(gdata), 0xD000):
-                break
-            start = pos
-            while pos < len(gdata) - 1:
-                if gdata[pos] == 0 and gdata[pos+1] == 0:
-                    break
-                pos += 2
-            text = gdata[start:pos].decode('utf-16-le', errors='replace')
-            byte_len = pos - start
-            if len(text) > 0:
-                string_table.append((start, text, byte_len))
-            pos += 2
+            return table
 
-        if len(string_table) < 50:
-            self.log_line.emit(f"  ⚠ Only found {len(string_table)} strings, skipping")
-            return
+        def rewrite_region(data, orig_strings, n_strings, region_start, region_bytes,
+                           slot_start, meta, log_fn):
+            """Rewrite a string region with dynamic redistribution.
+            Never writes beyond region_start + region_bytes."""
+            # Build new text list
+            new_texts = []
+            for i in range(n_strings):
+                slot_id = slot_start + i // 3
+                field = i % 3  # 0=title, 1=album, 2=artist
+                if slot_id in meta:
+                    t, ar, al = meta[slot_id]
+                    if field == 0 and t: new_texts.append(t)
+                    elif field == 1 and al: new_texts.append(al)
+                    elif field == 2 and ar: new_texts.append(ar)
+                    else: new_texts.append(orig_strings[i][1] if i < len(orig_strings) else "")
+                else:
+                    new_texts.append(orig_strings[i][1] if i < len(orig_strings) else "")
 
-        # Music strings start at index 3 (after UI strings)
-        # Each song = 3 consecutive strings: (title, album, artist)
-        # Slot N → base index = 3 + (N-1) * 3
-        MUSIC_START_IDX = 3
+            encoded = [t.encode('utf-16-le') for t in new_texts]
+            total = sum(len(e) + 2 for e in encoded)
+
+            # Scale down if overflow
+            if total > region_bytes:
+                avail_content = region_bytes - n_strings * 2
+                total_content = sum(len(e) for e in encoded)
+                if total_content > 0:
+                    scale = avail_content / total_content
+                    log_fn(f"  ↳ Strings scaled to ~{scale*100:.0f}% to fit region ({region_bytes}B)")
+                    for i in range(len(encoded)):
+                        mx = int(len(encoded[i]) * scale) // 2 * 2
+                        if mx < 2: mx = 2
+                        encoded[i] = encoded[i][:mx]
+
+            # Write strings with hard boundary check
+            count = 0
+            wp = region_start
+            for i, enc in enumerate(encoded):
+                end = wp + len(enc)
+                # HARD STOP: never exceed region boundary
+                if end + 2 > region_start + region_bytes:
+                    avail = region_start + region_bytes - wp - 2
+                    avail = (avail // 2) * 2
+                    if avail < 0: avail = 0
+                    enc = enc[:avail]
+                    end = wp + len(enc)
+                data[wp:end] = enc
+                data[end] = 0; data[end+1] = 0
+                wp = end + 2
+                if i < len(orig_strings) and orig_strings[i][1] != new_texts[i]:
+                    count += 1
+
+            # Zero-fill remaining space
+            if wp < region_start + region_bytes:
+                data[wp:region_start + region_bytes] = b'\x00' * (region_start + region_bytes - wp)
+            return count
+
         patched = 0
+        st = parse_strings(gdata, 0xB700, 0xD000)
 
-        # Parse second string region for slots 41-44 (at ~0x2C004)
-        string_table_2 = []
-        pos2 = 0x2C004
-        while pos2 < min(len(gdata), 0x2C200):
-            while pos2 < len(gdata) - 1 and gdata[pos2] == 0 and gdata[pos2+1] == 0:
-                pos2 += 2
-            if pos2 >= 0x2C200: break
-            start2 = pos2
-            while pos2 < len(gdata) - 1:
-                if gdata[pos2] == 0 and gdata[pos2+1] == 0: break
-                pos2 += 2
-            text2 = gdata[start2:pos2].decode('utf-16-le', errors='replace')
-            blen2 = pos2 - start2
-            if len(text2) > 0:
-                string_table_2.append((start2, text2, blen2))
-            pos2 += 2
+        # ═══ Slots 1-40: main region (120 strings) ═══
+        MUSIC_START = 3
+        N_MUSIC = 120
+        if any(sid <= 40 for sid in metadata) and len(st) > MUSIC_START + N_MUSIC:
+            region_start = st[MUSIC_START][0]
+            last = st[MUSIC_START + N_MUSIC - 1]
+            region_end = last[0] + last[2] + 2
+            music_strings = st[MUSIC_START:MUSIC_START + N_MUSIC]
+            patched += rewrite_region(gdata, music_strings, N_MUSIC,
+                                       region_start, region_end - region_start,
+                                       1, metadata, self.log_line.emit)
 
-        for slot_id, (new_title, new_artist, new_album) in metadata.items():
-            if slot_id <= 40:
-                # Slots 1-40: main string table
-                base_idx = MUSIC_START_IDX + (slot_id - 1) * 3
-                patches = []
-                if new_title and base_idx < len(string_table):
-                    patches.append((string_table, base_idx, new_title))
-                if new_album and base_idx + 1 < len(string_table):
-                    patches.append((string_table, base_idx + 1, new_album))
-                if new_artist and base_idx + 2 < len(string_table):
-                    patches.append((string_table, base_idx + 2, new_artist))
-            elif slot_id <= 44:
-                # Slots 41-44: second string region, groups of 3 starting at index 0
-                base_idx_2 = (slot_id - 41) * 3
-                patches = []
-                if new_title and base_idx_2 < len(string_table_2):
-                    patches.append((string_table_2, base_idx_2, new_title))
-                if new_album and base_idx_2 + 1 < len(string_table_2):
-                    patches.append((string_table_2, base_idx_2 + 1, new_album))
-                if new_artist and base_idx_2 + 2 < len(string_table_2):
-                    patches.append((string_table_2, base_idx_2 + 2, new_artist))
-            else:
-                continue
-
-            for tbl, str_idx, new_text in patches:
-                soff, old_text, old_byte_len = tbl[str_idx]
-                new_encoded = new_text.encode('utf-16-le')
-                if len(new_encoded) > old_byte_len:
-                    new_encoded = new_encoded[:old_byte_len]
-                    if len(new_encoded) % 2 != 0:
-                        new_encoded = new_encoded[:-1]
-                padded = new_encoded + b'\x00' * (old_byte_len - len(new_encoded))
-                gdata[soff:soff + old_byte_len] = padded
-                patched += 1
+        # ═══ Slots 41-44: second region (12 strings) ═══
+        slots_41 = {k: v for k, v in metadata.items() if 41 <= k <= 44}
+        if slots_41:
+            st2 = parse_strings(gdata, 0x2C004, 0x2C200)
+            if len(st2) >= 12:
+                r2_start = st2[0][0]
+                r2_last = st2[11]
+                r2_end = r2_last[0] + r2_last[2] + 2
+                patched += rewrite_region(gdata, st2[:12], 12,
+                                           r2_start, r2_end - r2_start,
+                                           41, slots_41, self.log_line.emit)
 
         if patched > 0:
             with open(output_iso, 'r+b') as f:
                 f.seek(offset)
                 f.write(gdata)
-            self.log_line.emit(f"  ✓ Patched {patched} song name strings in GLOBALUS.BIN")
+            self.log_line.emit(f"  ✓ Patched {patched} strings (dynamic redistribution)")
         else:
             self.log_line.emit("  ↳ No song names to patch")
 
@@ -1279,7 +1288,7 @@ class MainWindow(QMainWindow):
         self._update_inject_btn()
 
     def _check_deps(self):
-        d = {"ffmpeg": bool(shutil.which("ffmpeg")), "7z": bool(shutil.which("7z"))}
+        d = {"ffmpeg": bool(shutil.which("ffmpeg"))}
         d["gcc"] = bool(shutil.which("gcc"))
         return d
 
@@ -1296,7 +1305,7 @@ class MainWindow(QMainWindow):
         s = QLabel("CUSTOM MUSIC INJECTOR v11.2"); s.setObjectName("subtitleLabel"); ta.addWidget(s)
         hl.addLayout(ta); hl.addStretch()
         da = QVBoxLayout(); da.setSpacing(1)
-        for name, key in [("ffmpeg","ffmpeg"),("7z","7z"),("gcc (C encoder)","gcc")]:
+        for name, key in [("ffmpeg","ffmpeg"),("gcc (C encoder)","gcc")]:
             ok = self.deps.get(key, False)
             txt = f"{'✓' if ok else '✗'} {name}"
             lb = QLabel(txt); lb.setStyleSheet(f"font-size:10px;color:{'#69f0ae' if ok else '#ff5252'}")
@@ -1613,12 +1622,14 @@ class MainWindow(QMainWindow):
             self.table.setCellWidget(row, 6, b)
 
     def _set_limited_text(self, row, col, text, max_chars):
-        """Set cell text with color-coding based on char limit."""
+        """Set cell text with color-coding. With dynamic redistribution,
+        the limit is soft — text can exceed the original field size as long as
+        the total region budget allows it."""
         item = QTableWidgetItem(text)
         if len(text) > max_chars:
-            # Text will be truncated — show in orange/red
-            item.setForeground(QColor("#ff6600"))
-            item.setToolTip(f"⚠ Will be truncated to {max_chars} chars: \"{text[:max_chars]}\"")
+            # Exceeds original field size but may still fit with redistribution
+            item.setForeground(QColor("#ffaa00"))
+            item.setToolTip(f"↔ Exceeds original ({len(text)}/{max_chars} chars) — space will be redistributed from shorter fields")
         else:
             item.setForeground(QColor("#4fc3f7"))
             item.setToolTip(f"✓ Fits ({len(text)}/{max_chars} chars)")
@@ -1632,7 +1643,6 @@ class MainWindow(QMainWindow):
                 n > 0
                 and self.iso_path is not None
                 and bool(self.deps.get("ffmpeg"))
-                and bool(self.deps.get("7z"))
             )
 
     def _assign_single(self, sid):
