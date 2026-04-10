@@ -20,18 +20,17 @@ RUN:
 """
 
 import sys, os, struct, subprocess, shutil, tempfile, html as html_mod
-from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Dict
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QFileDialog, QProgressBar, QTextEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
     QTabWidget, QFrame, QGroupBox, QAbstractItemView, QTreeWidget,
-    QTreeWidgetItem, QSplitter, QSizePolicy
+    QTreeWidgetItem, QSplitter
 )
 from PySide6.QtCore import Qt, Signal, QObject, QThread
-from PySide6.QtGui import QColor, QPalette, QDragEnterEvent, QDropEvent
+from PySide6.QtGui import QColor, QPalette
 
 # ─── Burnout 3 ISO Knowledge ─────────────────────────────────────────────
 KNOWN_DISC_IDS = {
