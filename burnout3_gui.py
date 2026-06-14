@@ -1931,18 +1931,35 @@ class MainWindow(QMainWindow):
 
     def _st_add_folders(self):
         """Pick one or MORE folders and APPEND all their audio to the list (never replaces)."""
-        dlg = QFileDialog(self, "Select one or more folders of songs")
+        dlg = QFileDialog(self, "Select folder(s) — Ctrl/Shift to pick several")
         dlg.setFileMode(QFileDialog.FileMode.Directory)
         dlg.setOption(QFileDialog.Option.DontUseNativeDialog, True)   # native dialogs can't multi-select dirs
         dlg.setOption(QFileDialog.Option.ShowDirsOnly, True)
-        for v in dlg.findChildren(QListView) + dlg.findChildren(QTreeView):   # multi-select on inner views
+        views = dlg.findChildren(QListView) + dlg.findChildren(QTreeView)
+        for v in views:
             v.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         if not dlg.exec():
             return
+        # In Directory mode selectedFiles() returns the *current* dir (that's why picking specific
+        # subfolders pulled the whole parent). Read the actually-highlighted items from the views instead,
+        # resolving each name against the current directory.
+        cwd = dlg.directory().absolutePath()
+        names = set()
+        for v in views:
+            sm = v.selectionModel()
+            if not sm:
+                continue
+            for idx in sm.selectedIndexes():
+                if idx.column() == 0:
+                    nm = idx.data(Qt.ItemDataRole.DisplayRole)
+                    if nm:
+                        names.add(nm)
+        folders = [d for d in (os.path.join(cwd, nm) for nm in names) if os.path.isdir(d)]
+        if not folders:                                  # nothing highlighted -> the single navigated dir
+            folders = [d for d in dlg.selectedFiles() if os.path.isdir(d)]
         files = []
-        for d in dlg.selectedFiles():
-            if os.path.isdir(d):
-                files += self._st_folder_audio(d)
+        for d in folders:
+            files += self._st_folder_audio(d)
         if not files:
             QMessageBox.warning(self, "No audio", "No audio files found in the selected folder(s)."); return
         self._st_add_songs_paths(files)   # APPEND to the end
@@ -1980,6 +1997,16 @@ class MainWindow(QMainWindow):
         custom = sum(1 for r in range(n)
                      if self.exp_table.item(r, 1) and self.exp_table.item(r, 1).data(Qt.ItemDataRole.UserRole))
         self.lbl_expcount.setText(f"{n} tracks · {custom} custom · {n - custom} original")
+        # Portable ISO handles the 44 slots; going beyond 44 needs HostFS. Enable only the applicable one.
+        expansion = n > 44
+        if hasattr(self, "btn_build_iso"):
+            self.btn_build_iso.setEnabled(not expansion)
+            self.btn_build_iso.setToolTip("" if not expansion
+                else "Disabled: you have more than 44 tracks → use BUILD HostFS (a portable ISO supports 44).")
+        if hasattr(self, "btn_build_exp"):
+            self.btn_build_exp.setEnabled(expansion)
+            self.btn_build_exp.setToolTip("" if expansion
+                else "Disabled: only needed for +tracks beyond 44. Add tracks past 44 to enable it.")
 
     def _st_build(self):
         n = self.exp_table.rowCount()
