@@ -1,8 +1,13 @@
 /*
  * PS-ADPCM Encoder for Burnout 3: Takedown — Optimized HQ
- * Tests 5 filters × 3 smart shifts = 15 combos (vs 65 brute force)
+ * Tests 5 filters × 5 smart shifts = 25 combos (vs 65 brute force)
  * LLRR layout, LO-first nibbles, flags=0x02
- * 
+ *
+ * The predictor feedback is rounded to a 16-bit integer after every sample so
+ * the encoder models exactly what the integer PS-ADPCM hardware decoder will
+ * reconstruct. Without this the float history drifts away from the decoder's,
+ * accumulating error across the block and adding audible graininess.
+ *
  * Compile: gcc -O3 -march=native -shared -fPIC -o libpsxenc.so psxadpcm.c -lm
  */
 #include <math.h>
@@ -59,6 +64,8 @@ static double try_encode(const double *samples, int n,
         if (nib > 7) nib = 7;
         nibs_out[i] = nib;
         dec = nib * scale + pred;
+        /* Match the integer decoder: it outputs int16 PCM and feeds that back. */
+        dec = round(dec);
         if (dec > 32767.0) dec = 32767.0;
         if (dec < -32768.0) dec = -32768.0;
         err += (s - dec) * (s - dec);
