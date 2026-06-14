@@ -1343,8 +1343,8 @@ class ExpansionWorker(QObject):
             msg = (f"Soundtrack built: {n} track(s) total — {custom} custom, {n-custom} original.\n"
                    f"Rebuilt: {files}\nNames + GLOBALUS rebuilt.\n\n"
                    f"{pnach_line}\n\n"
-                   "In PCSX2 enable cheats: [HostFS] + [ELF Code Cave] + [EATRAX expansion], "
-                   "then boot the ISO from the HostFS (ciopfs) mount.")
+                   "In PCSX2 enable cheats: [HostFS] + [EATRAX expansion] (the [ELF Code Cave] is no "
+                   "longer needed), then boot the ISO from the HostFS (ciopfs) mount.")
             self.log_line.emit("✓ Done.")
             self.finished.emit(True, msg)
         except Exception as e:
@@ -1826,7 +1826,7 @@ class MainWindow(QMainWindow):
                       "ones below; untouched slots keep the original track. Names auto-romanize from any "
                       "language. Then pick a build:\n"
                       "  💿 PORTABLE ISO — 44 full-length + unlimited names, self-contained, no cheats (PCSX2/Android/PS2).\n"
-                      "  🛠 HostFS — adds N tracks beyond 44 (full-length); needs cheats [HostFS]+[ELF Code Cave]+[EATRAX expansion].")
+                      "  🛠 HostFS — adds N tracks beyond 44 (full-length); needs cheats [HostFS]+[EATRAX expansion] (auto-written).")
         note.setWordWrap(True)
         note.setStyleSheet("color:#888;font-size:11px;padding:10px;background:rgba(255,140,0,0.05);border:1px solid #222;border-radius:8px")
         lay.addWidget(note)

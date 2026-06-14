@@ -8,7 +8,8 @@ GLOBALUS string-table relocation, full-length RWS building, romanization.
 The GUI calls build_expansion(); nothing here touches the ISO — all output lands in
 the HostFS folder (the extracted disc) + a PCSX2 .pnach.
 
-In PCSX2 the user enables: [HostFS] + [ELF Code Cave] + [EATRAX expansion] (this pnach).
+In PCSX2 the user enables: [HostFS] + [EATRAX expansion] (this pnach). The metadata array now lives
+in a free ELF zero-run (0x485894) instead of Nahelam's code cave, so [ELF Code Cave] is no longer needed.
 """
 import os, struct, subprocess, tempfile, shutil, importlib.util
 
@@ -22,7 +23,8 @@ DIGITS = b''.join(bytes([0x30 + d, 0]) for d in range(10))  # "0".."9" null-term
 COUNT_VA = 0x004A5A24
 BASEPTR_VA = 0x004A5A6C
 META_VA = 0x004A5600
-CAVE = 0x0016B4F0                                    # Nahelam code cave (needs [ELF Code Cave])
+CAVE = 0x0016B4F0                                    # Nahelam code cave (legacy; needed [ELF Code Cave])
+META_NEW_VA = 0x00485894                             # free ELF zero-run (~6996B = 291 entries) -> NO cheat
 TRACKS_PER_FILE = 22
 
 def _fo(va): return SEG_FO + (va - SEG_VA)
@@ -126,20 +128,22 @@ def _rebuild_globalus(path, new_strings, log):
 # ---- pnach ----
 def _gen_pnach(entries, count, log):
     def w(addr, val): return f"patch=1,EE,{0x20000000 | addr:08X},extended,{val:08X}"
+    if len(entries) > 291:
+        raise RuntimeError("too many tracks for the free ELF region (max ~291)")
     L = ["gametitle=Burnout 3: Takedown (SLUS-21050) [NTSC-U/C]", "",
          "[EATRAX expansion]", "author=burnout3_gui",
-         "description=N custom full-length tracks (digit hook + relocated metadata + GLOBALUS) - REQUIRES ELF Code Cave", ""]
+         "description=N custom full-length tracks (digit hook + relocated metadata + GLOBALUS) - no code cave needed", ""]
     for base in HOOK_VAS:
         L.append(f"// digit hook @0x{base:08X}")
         L += [w(base + i * 4, x) for i, x in enumerate(HOOK)]
     L.append("// digit strings 0-9 @0x4CEA78")
     for k in range(0, len(DIGITS), 4):
         L.append(w(DIGITS_VA + k, struct.unpack_from("<I", DIGITS, k)[0]))
-    L.append("// master count + relocated metadata base pointer (code cave)")
-    L += [w(COUNT_VA, count), w(BASEPTR_VA, CAVE)]
-    L.append(f"// metadata array ({len(entries)} entries) @0x{CAVE:X}")
+    L.append("// master count + metadata base pointer -> free ELF zero-run (no [ELF Code Cave])")
+    L += [w(COUNT_VA, count), w(BASEPTR_VA, META_NEW_VA)]
+    L.append(f"// metadata array ({len(entries)} entries) @0x{META_NEW_VA:X}")
     flat = [v for e in entries for v in e]
-    L += [w(CAVE + k * 4, v) for k, v in enumerate(flat)]
+    L += [w(META_NEW_VA + k * 4, v) for k, v in enumerate(flat)]
     return "\n".join(L) + "\n"
 
 # ---- orchestrator ----
