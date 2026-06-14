@@ -7,12 +7,11 @@
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 ![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-orange)
 
-Replace the EA Trax soundtrack with your own music. Supports MP3, FLAC, M4A, OGG, WAV, OPUS, and more. Features a full GUI with drag & drop, automatic PS-ADPCM encoding, in-place ISO patching, and custom song name display.
+Replace the EA Trax soundtrack with your own music. Supports MP3, FLAC, M4A, OGG, WAV, OPUS, and more. Features a full GUI with drag & drop, automatic PS-ADPCM encoding, surgical ISO patching, and custom song name display.
 
-**Three soundtrack modes** (see [Soundtrack Modes](#-soundtrack-modes)):
-1. **Classic in-ISO** — replace the 44 EA Trax slots in a self-contained ISO (no cheats, runs anywhere). Fixed slot sizes (long songs are scaled).
-2. **Portable full-length ISO** ✨ — 44 **full-length** tracks (no truncation) + **unlimited romanized names**, baked into one ISO that boots on **PCSX2, Android (AetherSX2/NetherSX2), and real PS2 — with zero cheats**.
-3. **HostFS expansion** ✨ — add **N new tracks beyond 44**, full-length, unlimited names (plays from a host folder; needs PCSX2 cheats).
+**Two soundtrack modes** (see [Soundtrack Modes](#-soundtrack-modes)):
+1. **Portable full-length ISO** — 44 **full-length** tracks (no truncation) + **unlimited romanized names**, baked into one self-contained ISO that boots on **PCSX2, Android (AetherSX2/NetherSX2), and real PS2 — with zero cheats**.
+2. **HostFS expansion** — add **N new tracks beyond 44**, full-length, unlimited names (plays from a host folder; needs PCSX2 cheats).
 
 ## 🎬 Demo
 
@@ -44,11 +43,9 @@ Replace the EA Trax soundtrack with your own music. Supports MP3, FLAC, M4A, OGG
 - **Multicore pipeline** — every song is converted and encoded in parallel across all CPU cores (~7× faster encoding on an 8-core machine)
 - **Loudness matching** — 2-pass loudnorm brings custom music up to EA Trax's hot master level so it doesn't sound weak next to the original soundtrack
 - **LLRR stereo layout** — Correct super-block format verified through reverse engineering
-- **Dynamic RWS patching** — Track sizes in the RWS header are updated to match actual audio length
-- **Proportional scaling** — When songs exceed available space, all are scaled evenly with fade-out
-- **Character limit display** — Shows max characters per field with color coding (cyan = fits, orange = will truncate)
-- **Output folder selector** — Choose where to save the custom ISO
-- **In-place ISO patching** — No ISO rebuild needed, fast and safe
+- **Dynamic RWS patching** — Track sizes in the RWS header are updated to match actual (full) audio length
+- **Surgical ISO patching** — Keeps every original file byte-identical at its LBA and relocates only the enlarged track/name files to the disc end (no full rebuild → boots on PCSX2, Android and real PS2)
+- **Output selector** — Choose where to save the custom ISO
 - **Drag & drop GUI** — PySide6/Qt6 interface with dark theme
 - **Cross-platform** — Linux and Windows support
 
@@ -91,9 +88,8 @@ All three live in the single **`🎶 SOUNDTRACK`** tab (pre-loads the 44 origina
 
 | Build button | Tracks | Length | Names | Cheats? | Runs on |
 |------|--------|--------|-------|---------|---------|
-| 📀 **BUILD IN-PLACE ISO** | 44 (replace) | fixed-slot (scaled) | original byte-length | none · preserves CRC | PCSX2 / Android / PS2 |
-| 💿 **BUILD PORTABLE ISO** ✨ | 44 (replace) | **full** | **unlimited (romanized)** | none | PCSX2 / Android / PS2 |
-| 🛠 **BUILD HostFS** ✨ | **N (add beyond 44)** | **full** | **unlimited (romanized)** | `[HostFS]` + `[ELF Code Cave]` + `[EATRAX expansion]` | PCSX2 (PC) |
+| 💿 **BUILD PORTABLE ISO** | 44 (replace) | **full** | **unlimited (romanized)** | none | PCSX2 / Android / PS2 |
+| 🛠 **BUILD HostFS** | **N (add beyond 44)** | **full** | **unlimited (romanized)** | `[HostFS]` + `[ELF Code Cave]` + `[EATRAX expansion]` | PCSX2 (PC) |
 
 > **Why two builders?** Burnout 3 reads its loose disc files by **fixed LBA**, so a normal ISO rebuild black-screens. The portable builder works around this surgically (relocate only the path-opened EATRAX/GLOBALUS files to the disc end). Adding *new* files beyond 44 to the ISO isn't loadable by the game's CD path (it works via HostFS, which bypasses the disc filesystem) — so +tracks is HostFS-only for now. See [`BURNOUT3_EATRAX_HANDOFF.md`](BURNOUT3_EATRAX_HANDOFF.md) for the full reverse-engineering write-up.
 
@@ -168,7 +164,6 @@ Verified by byte-comparison against decoded/re-encoded original tracks.
 
 ## 📋 Known Limitations
 
-- **Classic in-ISO mode** — EATRAX space is fixed (149 MB + 150 MB); songs are scaled proportionally when they exceed it, and names are limited to the original string's byte length. (The **Portable full-length** and **HostFS** modes remove both limits.)
 - **+tracks beyond 44 is HostFS-only** — Adding *new* tracks past 44 works via HostFS but not yet in a self-contained ISO: the game can't load a newly-added disc file by path, and extending an existing `_EATRAX*.rws` track table breaks RenderWare's relocation. Cracking portable +tracks needs deeper RWS-audio-format / IOP RE (findings documented in `BURNOUT3_EATRAX_HANDOFF.md`).
 - **NTSC-U only** — Currently supports the US version (SLUS-21050). PAL/JP versions have different offsets.
 - **No CJK fonts** — The NTSC-U version doesn't include Japanese/Chinese/Korean font glyphs, so names are auto-**romanized** to Latin/romaji (which the font renders) instead of showing as squares.

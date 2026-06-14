@@ -1417,10 +1417,6 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         lay.addWidget(self.tabs, 1)
         self.tabs.addTab(self._build_iso_tab(), "📀  ISO + FILESYSTEM")
-        # Legacy ASSIGN TRACKS + PROCESS merged into SOUNDTRACK; widgets still built (they back the
-        # in-place injection engine + ISO-load wiring) but their tabs are hidden to avoid duplication.
-        self._legacy_tracks_w = self._build_tracks_tab()
-        self._legacy_process_w = self._build_process_tab()
         self.tabs.addTab(self._build_soundtrack_tab(), "🎶  SOUNDTRACK")
         self.tabs.addTab(self._build_info_tab(), "📖  GUIDE")
 
@@ -1589,7 +1585,10 @@ class MainWindow(QMainWindow):
             pass
 
     def _update_table_limits(self):
-        """Update table cells with placeholder text showing char limits."""
+        """Update table cells with placeholder text showing char limits (legacy ASSIGN table; no-op
+        now that it isn't shown — kept because _parse_globalus_limits still calls it on ISO load)."""
+        if not hasattr(self, "table"):
+            return
         for slot_id, (title_max, album_max, artist_max) in self.slot_char_limits.items():
             row = slot_id - 1
             if row >= self.table.rowCount():
@@ -1818,8 +1817,6 @@ class MainWindow(QMainWindow):
                       "ones below; untouched slots keep the original track. Names auto-romanize from any "
                       "language. Then pick a build:\n"
                       "  💿 PORTABLE ISO — 44 full-length + unlimited names, self-contained, no cheats (PCSX2/Android/PS2).\n"
-                      "  📀 IN-PLACE ISO — replaces the 44 in the same-size ISO (scaled to fit, original-length names, "
-                      "preserves CRC). Needs an ISO loaded in the ISO tab.\n"
                       "  🛠 HostFS — adds N tracks beyond 44 (full-length); needs cheats [HostFS]+[ELF Code Cave]+[EATRAX expansion].")
         note.setWordWrap(True)
         note.setStyleSheet("color:#888;font-size:11px;padding:10px;background:rgba(255,140,0,0.05);border:1px solid #222;border-radius:8px")
@@ -1860,10 +1857,6 @@ class MainWindow(QMainWindow):
         self.btn_build_iso.setObjectName("primaryBtn"); self.btn_build_iso.setMinimumHeight(46)
         self.btn_build_iso.clicked.connect(self._st_build_portable)
         lay.addWidget(self.btn_build_iso)
-        self.btn_build_inplace = QPushButton("📀  BUILD IN-PLACE ISO   —   same size · preserves CRC · scaled to fit (44 only)")
-        self.btn_build_inplace.setMinimumHeight(38)
-        self.btn_build_inplace.clicked.connect(self._st_build_inplace)
-        lay.addWidget(self.btn_build_inplace)
         self.btn_build_exp = QPushButton("🛠  BUILD HostFS folder   —   +tracks beyond 44 · needs PCSX2 cheats")
         self.btn_build_exp.setMinimumHeight(38)
         self.btn_build_exp.clicked.connect(self._st_build)
@@ -2069,58 +2062,6 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.critical(self, "Error", msg)
 
-    _INPLACE_LABEL = "📀  BUILD IN-PLACE ISO   —   same size · preserves CRC · scaled to fit (44 only)"
-
-    def _st_build_inplace(self):
-        """Classic in-place injection (same-size ISO, scaled-to-slot, original-length names) driven
-        from the SOUNDTRACK slots. Reuses InjectionWorker."""
-        n = self.exp_table.rowCount()
-        if not self.iso_path or not os.path.isfile(self.iso_path):
-            QMessageBox.critical(self, "", "Load a Burnout 3 ISO in the ISO + FILESYSTEM tab first."); return
-        if self.worker_thread and self.worker_thread.isRunning():
-            QMessageBox.warning(self, "", "Already processing."); return
-        if not self.deps.get("ffmpeg"):
-            QMessageBox.critical(self, "", "ffmpeg not found."); return
-        assignments = {}; metadata = {}
-        for r in range(min(44, n)):
-            si = self.exp_table.item(r, 1); fp = si.data(Qt.ItemDataRole.UserRole) if si else None
-            if fp and os.path.isfile(fp):
-                def cell(c): it = self.exp_table.item(r, c); return (it.text().strip() if it else "")
-                assignments[r + 1] = fp
-                t, a, al = cell(2), cell(3), cell(4)
-                if t or a or al: metadata[r + 1] = (t, a, al)
-        if not assignments:
-            QMessageBox.warning(self, "", "Assign at least one song to one of the 44 slots."); return
-        beyond = sum(1 for r in range(44, n)
-                     if self.exp_table.item(r, 1) and self.exp_table.item(r, 1).data(Qt.ItemDataRole.UserRole))
-        if beyond:
-            QMessageBox.information(self, "In-place ISO",
-                f"In-place mode replaces the 44 slots only; the {beyond} track(s) beyond 44 are skipped "
-                "(use PORTABLE ISO or HostFS for those).")
-        out, _ = QFileDialog.getSaveFileName(self, "Save ISO as...",
-                                             os.path.splitext(self.iso_path)[0] + "_custom.iso", "ISO (*.iso)")
-        if not out: return
-        self.btn_build_inplace.setEnabled(False); self.btn_build_inplace.setText("⏳ BUILDING..."); self.exp_log.clear()
-        self.worker_thread = QThread()
-        self.worker = InjectionWorker(self.iso_path, assignments, out, metadata)
-        self.worker.moveToThread(self.worker_thread)
-        self.worker_thread.started.connect(self.worker.run)
-        self.worker.progress.connect(self._st_inplace_progress)
-        self.worker.log_line.connect(self._st_log_line)
-        self.worker.finished.connect(self._st_inplace_done)
-        self.worker.finished.connect(self.worker_thread.quit)
-        self.worker.finished.connect(lambda: setattr(self, "_prev_worker", self.worker))
-        self.worker_thread.start()
-
-    def _st_inplace_progress(self, v, m):
-        self.btn_build_inplace.setText(f"⏳ {int(v*100)}%  {m[:42]}")
-
-    def _st_inplace_done(self, ok, msg):
-        self.btn_build_inplace.setEnabled(True); self.btn_build_inplace.setText(self._INPLACE_LABEL)
-        if ok:
-            QMessageBox.information(self, "ISO built!", f"{msg}\n\nLoad it in PCSX2.")
-        else:
-            QMessageBox.critical(self, "Error", msg)
 
     def _build_process_tab(self):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(24,24,24,24); lay.setSpacing(14)
@@ -2226,7 +2167,6 @@ class MainWindow(QMainWindow):
         &nbsp;&nbsp;&nbsp;(or add new ones). Title/Artist/Album auto-fill + romanize.<br>
         3. Pick a build:<br>
         &nbsp;&nbsp;💿 <b>PORTABLE ISO</b> — 44 full-length + unlimited names, no cheats (Android/PS2/PCSX2)<br>
-        &nbsp;&nbsp;📀 <b>IN-PLACE ISO</b> — same-size ISO, scaled to fit, preserves CRC<br>
         &nbsp;&nbsp;🛠 <b>HostFS</b> — add N tracks beyond 44 (needs PCSX2 cheats)<br>
         4. Load the resulting ISO in PCSX2 (or the HostFS folder)<br><br>
         Supported formats: MP3, M4A, FLAC, OGG, WAV, OPUS, WMA, AAC</p>
