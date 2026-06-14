@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QFileDialog, QProgressBar, QTextEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
     QTabWidget, QFrame, QGroupBox, QAbstractItemView, QTreeWidget,
-    QTreeWidgetItem, QSplitter
+    QTreeWidgetItem, QSplitter, QListView, QTreeView
 )
 from PySide6.QtCore import Qt, Signal, QObject, QThread
 from PySide6.QtGui import QColor, QPalette
@@ -1831,8 +1831,8 @@ class MainWindow(QMainWindow):
         lay.addLayout(fr)
 
         tb = QHBoxLayout()
-        bl = QPushButton("📁 Load folder (replace from #1)"); bl.clicked.connect(self._st_load_folder); tb.addWidget(bl)
-        ba = QPushButton("➕ Add songs (append)"); ba.clicked.connect(self._st_add_songs); tb.addWidget(ba)
+        bl = QPushButton("📁 Add folder(s)"); bl.clicked.connect(self._st_add_folders); tb.addWidget(bl)
+        ba = QPushButton("➕ Add songs"); ba.clicked.connect(self._st_add_songs); tb.addWidget(ba)
         br = QPushButton("➖ Remove / reset selected"); br.setObjectName("dangerBtn"); br.clicked.connect(self._st_remove_selected); tb.addWidget(br)
         bz = QPushButton("↺ Reset all"); bz.setObjectName("dangerBtn"); bz.clicked.connect(self._st_reset_all); tb.addWidget(bz)
         tb.addStretch()
@@ -1921,17 +1921,31 @@ class MainWindow(QMainWindow):
         if fp:
             self._st_set_custom(r, fp); self._st_update_count()
 
-    def _st_load_folder(self):
-        d = QFileDialog.getExistingDirectory(self, "Select a folder of songs (replaces from slot #1)")
-        if not d: return
-        fs = sorted(os.path.join(d, f) for f in os.listdir(d)
-                    if os.path.isfile(os.path.join(d, f)) and os.path.splitext(f)[1].lower() in AUDIO_EXTENSIONS)
-        if not fs:
-            QMessageBox.warning(self, "No audio", "No audio files found in that folder."); return
-        for i, fp in enumerate(fs):
-            if i >= self.exp_table.rowCount(): self._st_insert_row(self.exp_table.rowCount())
-            self._st_set_custom(i, fp)
-        self._st_renumber(); self._st_update_count()
+    def _st_folder_audio(self, d):
+        """All audio files in a folder (sorted), recursing into subfolders."""
+        out = []
+        for root, _dirs, files in os.walk(d):
+            out += [os.path.join(root, f) for f in sorted(files)
+                    if os.path.splitext(f)[1].lower() in AUDIO_EXTENSIONS]
+        return out
+
+    def _st_add_folders(self):
+        """Pick one or MORE folders and APPEND all their audio to the list (never replaces)."""
+        dlg = QFileDialog(self, "Select one or more folders of songs")
+        dlg.setFileMode(QFileDialog.FileMode.Directory)
+        dlg.setOption(QFileDialog.Option.DontUseNativeDialog, True)   # native dialogs can't multi-select dirs
+        dlg.setOption(QFileDialog.Option.ShowDirsOnly, True)
+        for v in dlg.findChildren(QListView) + dlg.findChildren(QTreeView):   # multi-select on inner views
+            v.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        if not dlg.exec():
+            return
+        files = []
+        for d in dlg.selectedFiles():
+            if os.path.isdir(d):
+                files += self._st_folder_audio(d)
+        if not files:
+            QMessageBox.warning(self, "No audio", "No audio files found in the selected folder(s)."); return
+        self._st_add_songs_paths(files)   # APPEND to the end
 
     def _st_add_songs(self):
         exts = " *.".join(e.strip(".") for e in AUDIO_EXTENSIONS)
