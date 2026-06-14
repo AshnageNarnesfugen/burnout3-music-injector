@@ -1,0 +1,43 @@
+gametitle=Burnout 3: Takedown (SLUS-21050) [NTSC-U/C]
+
+[EATRAX +2 tracks]
+author=claude+user
+description=digit=track/22 hook + count46 + meta 44/45 (32-bit writes)
+
+// Prepare digit hook @0x003FBCD0
+patch=1,EE,203FBCD0,extended,8E0200D8
+patch=1,EE,203FBCD4,extended,24010016
+patch=1,EE,203FBCD8,extended,0041001B
+patch=1,EE,203FBCDC,extended,00001012
+patch=1,EE,203FBCE0,extended,AE0200E0
+patch=1,EE,203FBCE4,extended,00024040
+patch=1,EE,203FBCE8,extended,3C01004D
+patch=1,EE,203FBCEC,extended,2421EA78
+patch=1,EE,203FBCF0,extended,00284021
+// Prepare digit hook @0x003FC38C
+patch=1,EE,203FC38C,extended,8E0200D8
+patch=1,EE,203FC390,extended,24010016
+patch=1,EE,203FC394,extended,0041001B
+patch=1,EE,203FC398,extended,00001012
+patch=1,EE,203FC39C,extended,AE0200E0
+patch=1,EE,203FC3A0,extended,00024040
+patch=1,EE,203FC3A4,extended,3C01004D
+patch=1,EE,203FC3A8,extended,2421EA78
+patch=1,EE,203FC3AC,extended,00284021
+// digit strings @0x4CEA78
+patch=1,EE,204CEA78,extended,00310030
+patch=1,EE,204CEA7C,extended,00330032
+// metadata entry 44 (pad slot @0x4A5A24 = master count 46)
+patch=1,EE,204A5A20,extended,0000002C
+patch=1,EE,204A5A24,extended,0000002E
+patch=1,EE,204A5A28,extended,00000CCF
+patch=1,EE,204A5A2C,extended,00000CD0
+patch=1,EE,204A5A30,extended,00000CD1
+patch=1,EE,204A5A34,extended,0000000F
+// metadata entry 45
+patch=1,EE,204A5A38,extended,0000002D
+patch=1,EE,204A5A3C,extended,00000000
+patch=1,EE,204A5A40,extended,00000CD2
+patch=1,EE,204A5A44,extended,00000CD3
+patch=1,EE,204A5A48,extended,00000CD4
+patch=1,EE,204A5A4C,extended,0000000F

@@ -1,0 +1,23 @@
+gametitle=Burnout 3: Takedown (USA) SLUS-21050
+comment=Phase3 HOOK ONLY (digit=track/22) - isolation test
+
+patch=1,EE,003FBCD0,extended,8E0200D8
+patch=1,EE,003FBCD4,extended,24010016
+patch=1,EE,003FBCD8,extended,0041001B
+patch=1,EE,003FBCDC,extended,00001012
+patch=1,EE,003FBCE0,extended,AE0200E0
+patch=1,EE,003FBCE4,extended,00024040
+patch=1,EE,003FBCE8,extended,3C01004C
+patch=1,EE,003FBCEC,extended,2421EA78
+patch=1,EE,003FBCF0,extended,00284021
+patch=1,EE,003FC38C,extended,8E0200D8
+patch=1,EE,003FC390,extended,24010016
+patch=1,EE,003FC394,extended,0041001B
+patch=1,EE,003FC398,extended,00001012
+patch=1,EE,003FC39C,extended,AE0200E0
+patch=1,EE,003FC3A0,extended,00024040
+patch=1,EE,003FC3A4,extended,3C01004C
+patch=1,EE,003FC3A8,extended,2421EA78
+patch=1,EE,003FC3AC,extended,00284021
+patch=1,EE,004CEA78,extended,00310030
+patch=1,EE,004CEA7C,extended,00330032

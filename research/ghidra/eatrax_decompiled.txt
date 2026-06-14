@@ -1,0 +1,213 @@
+================ FUNC @ 0x3fbc20 ================  
+  calls: 0x386240 0x3863c0 0x386a60 0x126b40 0x3fc700 0x42b580 0x3fc700 0x42b500   
+
+void FUN_003fbc20(undefined8 param_1,long param_2)
+
+{
+  undefined4 uVar1;
+  int iVar2;
+  
+  iVar2 = (int)param_1;
+  if (param_2 == -1) {
+    *(byte *)(iVar2 + 0xe8) = *(byte *)(iVar2 + 0xe8) & 0xfe;
+    if (*(char *)(iVar2 + 0xbc) == '\0') {
+      FUN_0042b580(iVar2 + 8);
+    }
+    else {
+      if (*(int *)(iVar2 + 0xc0) != 0) {
+        FUN_00386240();
+        FUN_003863c0(*(undefined4 *)(iVar2 + 0xc0));
+        FUN_00386a60(0x1e774e0,*(undefined4 *)(iVar2 + 0xc0));
+        *(undefined4 *)(iVar2 + 0xc0) = 0;
+      }
+      if (*(int *)(iVar2 + 0xd0) == 4) {
+        *(undefined4 *)(iVar2 + 0xd0) = 5;
+        FUN_003fc700(param_1);
+      }
+      *(undefined4 *)(iVar2 + 200) = 6;
+    }
+  }
+  else {
+    *(undefined1 *)(iVar2 + 0xea) = 0;
+    if (*(char *)(iVar2 + 0xbc) == '\0') {
+      FUN_0042b500(iVar2 + 8);
+      *(undefined1 *)(iVar2 + 0xe9) = 1;
+    }
+    else {
+      *(int *)(iVar2 + 0xd8) = (int)param_2;
+      *(int *)(iVar2 + 0xc4) = *(int *)(iVar2 + 0xb4) + (int)param_2 * 0x18;
+      *(undefined4 *)(iVar2 + 0xd4) = 0;
+      if (*(int *)(iVar2 + 0xd8) < 0x16) {
+        *(undefined4 *)(iVar2 + 0xe0) = 0;
+        uVar1 = uGpffff98a4;
+      }
+      else {
+        *(undefined4 *)(iVar2 + 0xe0) = 1;
+        uVar1 = uGpffff98a8;
+      }
+      FUN_00126b40(iVar2 + 0x48,0x4cea90,uGpffff9898,uGpffff989c,uVar1,uGpffff98ac);
+      if (*(int *)(iVar2 + 0xd0) == 4) {
+        *(undefined4 *)(iVar2 + 0xd0) = 5;
+        FUN_003fc700(param_1);
+      }
+      if (cRam004f5075 < '\x01') {
+        *(undefined1 *)(iVar2 + 0xe9) = 1;
+      }
+      else {
+        *(undefined1 *)(iVar2 + 0xe9) = 0;
+      }
+    }
+  }
+  return;
+}
+
+  
+
+================ FUNC @ 0x3fc2e0 ================  
+  calls: 0x386240 0x3863c0 0x386a60 0x127bf8 0x126b40 0x131e40 0x386080 0x386020 0x3fc700 0x42b570   
+
+void FUN_003fc2e0(undefined8 param_1)
+
+{
+  undefined *puVar1;
+  undefined *puVar2;
+  int iVar3;
+  int iVar4;
+  long lVar5;
+  int iVar6;
+  
+  iVar6 = (int)param_1;
+  if (*(int *)(iVar6 + 0xd8) != -1) {
+    *(byte *)(iVar6 + 0xe8) = *(byte *)(iVar6 + 0xe8) & 0xfe;
+    if (*(char *)(iVar6 + 0xbc) == '\0') {
+      FUN_0042b570(iVar6 + 8);
+    }
+    else {
+      if (*(int *)(iVar6 + 0xc0) == 0) {
+        *(undefined4 *)(iVar6 + 0xd4) = 0;
+      }
+      else {
+        if (*(int *)(iVar6 + 200) == 3) {
+          lVar5 = FUN_00131e40(0x4ee040);
+          if (lVar5 == 0) {
+            iVar3 = FUN_00386080(*(undefined4 *)(iVar6 + 0xc0),0);
+          }
+          else {
+            iVar3 = 0;
+          }
+          iVar4 = FUN_00386020(*(undefined4 *)(iVar6 + 0xc0),2);
+          *(int *)(iVar6 + 0xd4) = iVar4 * ((iVar3 + iVar4 + -1) / iVar4);
+        }
+        else {
+          *(undefined4 *)(iVar6 + 0xd4) = 0;
+        }
+        if (*(int *)(iVar6 + 0xd0) == 4) {
+          *(undefined4 *)(iVar6 + 0xd0) = 5;
+          FUN_003fc700(param_1);
+        }
+        FUN_00386240(*(undefined4 *)(iVar6 + 0xc0));
+        FUN_003863c0(*(undefined4 *)(iVar6 + 0xc0));
+        FUN_00386a60(0x1e774e0,*(undefined4 *)(iVar6 + 0xc0));
+        *(undefined4 *)(iVar6 + 0xc0) = 0;
+      }
+      *(undefined4 *)(iVar6 + 200) = 4;
+      lVar5 = FUN_00127bf8(iVar6 + 0x48,PTR_s_EATraxD_004e1f10);
+      puVar1 = PTR_DAT_004e1f18;
+      puVar2 = PTR_DAT_004e1f14;
+      if (lVar5 != 0) {
+        if (*(int *)(iVar6 + 0xd8) < 0x16) {
+          *(undefined4 *)(iVar6 + 0xe0) = 0;
+          puVar1 = puVar2;
+        }
+        else {
+          *(undefined4 *)(iVar6 + 0xe0) = 1;
+        }
+        FUN_00126b40(iVar6 + 0x48,0x4cea90,PTR_s_tracks__004e1f08,PTR_s__EATrax_004e1f0c,puVar1,
+                     PTR_DAT_004e1f1c);
+      }
+    }
+  }
+  return;
+}
+
+  
+
+================ FUNC @ 0x42b5e0 ================  
+  calls:   
+
+void FUN_0042b5e0(undefined4 *param_1)
+
+{
+  *param_1 = 0;
+  return;
+}
+
+  
+
+================ FUNC @ 0x42b580 ================  
+  calls:   
+
+void FUN_0042b580(void)
+
+{
+  return;
+}
+
+  
+
+================ FUNC @ 0x42b500 ================  
+  calls:   
+
+void FUN_0042b500(void)
+
+{
+  return;
+}
+
+  
+
+================ FUNC @ 0x386080 ================  
+  calls: 0x2a2c80 0x2a2e50 0x2a2e50   
+
+float FUN_00386080(int param_1,long param_2)
+
+{
+  long lVar1;
+  undefined1 auStack_10 [4];
+  undefined4 uStack_c;
+  float fStack_8;
+  undefined4 uStack_4;
+  
+  lVar1 = FUN_002a2c80(*(undefined4 *)(param_1 + 0x1cc));
+  if ((lVar1 == 6) || (lVar1 == 5)) {
+    uStack_c = 3;
+    if (param_2 == 0) {
+      uStack_4 = 2;
+      FUN_002a2e50(*(undefined4 *)(param_1 + 0x1cc),auStack_10);
+    }
+    else {
+      uStack_4 = 1;
+      FUN_002a2e50(*(undefined4 *)(param_1 + 0x1cc),auStack_10);
+      fStack_8 = (float)(int)(fStack_8 * 1000.0);
+    }
+  }
+  else {
+    fStack_8 = 0.0;
+  }
+  return fStack_8;
+}
+
+  
+
+================ FUNC @ 0x386010 ================  
+  calls:   
+
+bool FUN_00386010(int param_1)
+
+{
+  return *(int *)(param_1 + 0x1d0) == 6;
+}
+
+  
+
+======= callers of path builder 0x3FBC20 =======  
