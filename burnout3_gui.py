@@ -1331,9 +1331,18 @@ class ExpansionWorker(QObject):
                                       progress=self.log_line.emit)
             n = res["count"]; custom = res["custom"]
             files = ", ".join(f"_eatrax{f}.rws" for f in res["files"]) or "(originals untouched)"
+            pnach_path = res.get("pnach_path")
+            if pnach_path:
+                pnach_line = f"pnach written to your PCSX2 cheats folder:\n  {pnach_path}"
+            else:
+                # No cheats folder set/found — save it into the HostFS folder so it's never lost.
+                fb = os.path.join(self.hostfs_dir, "BEBF8793_eatrax_expansion.pnach")
+                open(fb, "w").write(res["pnach"])
+                pnach_line = ("no PCSX2 cheats folder set — pnach saved to:\n  " + fb +
+                              "\n  ➜ copy it into your PCSX2 'cheats' folder.")
             msg = (f"Soundtrack built: {n} track(s) total — {custom} custom, {n-custom} original.\n"
-                   f"Rebuilt: {files}\n"
-                   f"Names + GLOBALUS rebuilt; pnach: {res.get('pnach_path') or '(no PCSX2 cheats dir found — pnach not written)'}\n\n"
+                   f"Rebuilt: {files}\nNames + GLOBALUS rebuilt.\n\n"
+                   f"{pnach_line}\n\n"
                    "In PCSX2 enable cheats: [HostFS] + [ELF Code Cave] + [EATRAX expansion], "
                    "then boot the ISO from the HostFS (ciopfs) mount.")
             self.log_line.emit("✓ Done.")
@@ -1830,6 +1839,14 @@ class MainWindow(QMainWindow):
         bf = QPushButton("📂 HostFS folder"); bf.clicked.connect(self._st_choose_folder); fr.addWidget(bf)
         lay.addLayout(fr)
 
+        cr = QHBoxLayout()
+        self.cheats_dir = self._detect_cheats_dir()      # auto-detect PCSX2 cheats folder (override below)
+        self.lbl_cheats = QLabel()
+        cr.addWidget(self.lbl_cheats, 1)
+        bch = QPushButton("📂 PCSX2 cheats"); bch.clicked.connect(self._st_choose_cheats); cr.addWidget(bch)
+        lay.addLayout(cr)
+        self._update_cheats_label()
+
         tb = QHBoxLayout()
         bl = QPushButton("📁 Add folder(s)"); bl.clicked.connect(self._st_add_folders); tb.addWidget(bl)
         ba = QPushButton("➕ Add songs"); ba.clicked.connect(self._st_add_songs); tb.addWidget(ba)
@@ -1869,6 +1886,34 @@ class MainWindow(QMainWindow):
         d = QFileDialog.getExistingDirectory(self, "Select HostFS folder (extracted disc)", self.exp_folder)
         if d:
             self.exp_folder = d; self.lbl_expfolder.setText(f"HostFS folder: {d}")
+
+    def _detect_cheats_dir(self):
+        """First existing PCSX2 'cheats' folder across common install layouts (Flatpak/native/Win/mac)."""
+        home = os.path.expanduser("~")
+        for c in (
+            os.path.join(home, ".var/app/net.pcsx2.PCSX2/config/PCSX2/cheats"),  # Linux Flatpak
+            os.path.join(home, ".config/PCSX2/cheats"),                          # Linux native / AppImage
+            os.path.join(home, "Documents/PCSX2/cheats"),                        # Windows
+            os.path.join(home, "AppData/Roaming/PCSX2/cheats"),                  # Windows (alt)
+            os.path.join(home, "Library/Application Support/PCSX2/cheats"),      # macOS
+        ):
+            if os.path.isdir(c):
+                return c
+        return None
+
+    def _update_cheats_label(self):
+        if self.cheats_dir:
+            self.lbl_cheats.setText(f"PCSX2 cheats: {self.cheats_dir}")
+            self.lbl_cheats.setStyleSheet("color:#69f0ae;font-size:11px")
+        else:
+            self.lbl_cheats.setText("PCSX2 cheats: not found — pick your folder (else the pnach is saved into the HostFS folder)")
+            self.lbl_cheats.setStyleSheet("color:#ffaa00;font-size:11px")
+
+    def _st_choose_cheats(self):
+        d = QFileDialog.getExistingDirectory(self, "Select your PCSX2 'cheats' folder",
+                                             self.cheats_dir or os.path.expanduser("~"))
+        if d:
+            self.cheats_dir = d; self._update_cheats_label()
 
     def _st_romanizer(self):
         try:
@@ -2028,8 +2073,7 @@ class MainWindow(QMainWindow):
                 slots.append(None)
         if custom == 0:
             QMessageBox.warning(self, "", "Assign at least one song (replace a slot or add new ones)."); return
-        cheats = os.path.expanduser("~/.var/app/net.pcsx2.PCSX2/config/PCSX2/cheats")
-        cheats = cheats if os.path.isdir(cheats) else None
+        cheats = self.cheats_dir if (self.cheats_dir and os.path.isdir(self.cheats_dir)) else None
         self.btn_build_exp.setEnabled(False); self.btn_build_exp.setText("⏳ BUILDING..."); self.exp_log.clear()
         self.worker_thread = QThread()
         self.exp_worker = ExpansionWorker(self.exp_folder, slots, cheats)
