@@ -8,18 +8,21 @@ Features:
   - Auto-detects 44 tracks in _EATRAX0.RWS & _EATRAX1.RWS
   - PS-ADPCM encoding with C accelerator (gcc auto-compile)
   - LLRR stereo layout, 32kHz, optimized 5×13 filter search
+  - Multicore pipeline — convert + encode every song in parallel
+  - Two-pass loudness matching to EA Trax's hot masters
   - In-place ISO patching (no rebuild needed)
 
 INSTALL:
   pip install PySide6
-  sudo pacman -S ffmpeg p7zip gcc  (Arch)
-  sudo apt install ffmpeg p7zip-full gcc  (Debian/Ubuntu)
+  sudo pacman -S ffmpeg gcc  (Arch)
+  sudo apt install ffmpeg gcc  (Debian/Ubuntu)
 
 RUN:
   python3 burnout3_gui.py
 """
 
-import sys, os, struct, subprocess, shutil, tempfile, html as html_mod
+import sys, os, struct, subprocess, shutil, tempfile, math, html as html_mod
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict
 
 from PySide6.QtWidgets import (
@@ -135,10 +138,21 @@ RWS_AUDIO_DATA = 0x0000080F
 #   - Nibble order: first sample in LOW nibble, second in HIGH
 #   - All block flags = 0x02, Filter 2 with auto shift
 
-import numpy as np
 import ctypes
 
 _c_lib = None
+
+# Audio processing chain shared by both encode passes.
+# Resample to 32 kHz with high-precision soxr, then a gentle 15.5 kHz lowpass
+# (just under the 16 kHz Nyquist). 15.5 kHz keeps the brightness the old
+# 14 kHz cutoff was throwing away while still taming aliasing.
+AUDIO_RESAMPLE_FILTER = "aresample=resampler=soxr:precision=28,lowpass=f=15500"
+
+# Loudness target. EA Trax masters are very hot, so custom music must be brought
+# up to a comparable level or it sounds weak next to the original soundtrack and
+# the engine SFX. Two-pass loudnorm (measure, then apply a linear gain) at
+# ~-10 LUFS / -1 dBFS true peak matches the game without pumping artifacts.
+LOUDNORM_TARGET = "I=-10:TP=-1.0:LRA=11"
 
 def _compile_c_encoder():
     """Compile psxadpcm.c → libpsxenc.so on first run."""
@@ -157,14 +171,25 @@ def _compile_c_encoder():
             need_compile = True
 
     if need_compile and os.path.isfile(c_path):
-        try:
-            r = subprocess.run(
-                ["gcc", "-O3", "-shared", "-fPIC", "-o", so_path, c_path, "-lm"],
-                capture_output=True, text=True, timeout=30
-            )
-            if r.returncode != 0:
-                return None
-        except Exception:
+        # Try aggressive flags first, fall back to plain -O3 if the toolchain
+        # rejects them (e.g. -march=native unsupported on some cross compilers).
+        flag_sets = [
+            ["-O3", "-march=native", "-ffast-math", "-funroll-loops"],
+            ["-O3"],
+        ]
+        compiled = False
+        for flags in flag_sets:
+            try:
+                r = subprocess.run(
+                    ["gcc", *flags, "-shared", "-fPIC", "-o", so_path, c_path, "-lm"],
+                    capture_output=True, text=True, timeout=60
+                )
+                if r.returncode == 0:
+                    compiled = True
+                    break
+            except Exception:
+                continue
+        if not compiled:
             return None
 
     if os.path.isfile(so_path):
@@ -182,33 +207,13 @@ def _compile_c_encoder():
     return None
 
 
-def encode_psx_adpcm_to_slot(pcm_s16le_stereo, slot_data_original):
-    """
-    Encode PCM s16le stereo → PS-ADPCM with LLRR layout.
-    Uses C encoder if available, Python fallback otherwise.
-    """
-    slot_size = len(slot_data_original)
-    pcm_bytes = pcm_s16le_stereo[:len(pcm_s16le_stereo) - (len(pcm_s16le_stereo) % 2)]
-    n_samples = len(pcm_bytes) // 2
-
-    # Try C encoder first (100x faster)
-    lib = _compile_c_encoder()
-    if lib is not None:
-        pcm_arr = (ctypes.c_short * n_samples)()
-        ctypes.memmove(pcm_arr, pcm_bytes, len(pcm_bytes))
-        out_arr = (ctypes.c_ubyte * slot_size)()
-        lib.encode_burnout3_adpcm(pcm_arr, n_samples, out_arr, slot_size)
-        return bytes(out_arr)
-
-    # Python fallback
-    return _encode_python_fallback(pcm_bytes, slot_size)
-
-
 def _encode_python_fallback(pcm_bytes, slot_size):
-    """Pure Python encoder — slower but always works."""
-    samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float64)
-    left = samples[0::2] if len(samples) >= 2 else samples
-    right = samples[1::2] if len(samples) >= 2 else np.zeros_like(left)
+    """Pure Python encoder — slower but always works, no numpy required."""
+    import array, math
+    samples = array.array('h')  # signed 16-bit
+    samples.frombytes(pcm_bytes[:len(pcm_bytes) - (len(pcm_bytes) % 2)])
+    left = samples[0::2]
+    right = samples[1::2]
 
     buf = bytearray(slot_size)
     for i in range(0, slot_size, 16):
@@ -218,26 +223,29 @@ def _encode_python_fallback(pcm_bytes, slot_size):
 
     def encode_ch(src, ch_offset):
         idx = 0; p1 = p2 = 0.0
+        src_len = len(src)
         for sblock in range(0, slot_size, 8192):
             for sub in range(2):
                 for block_i in range(0, 2048, 16):
                     boff = sblock + ch_offset + sub*2048 + block_i
                     if boff+16 > slot_size: return
                     max_d = 0.0; tp1=p1; tp2=p2
-                    for i2 in range(min(8,28)):
-                        s = src[idx+i2] if idx+i2 < len(src) else 0.0
+                    for i2 in range(8):
+                        s = src[idx+i2] if idx+i2 < src_len else 0.0
                         d = abs(s-(tp1*_C1+tp2*_C2))
                         if d>max_d: max_d=d
                         tp2=tp1; tp1=s
-                    shift = max(0,min(12, 12-int(np.log2(max(max_d/7,1)))))
+                    shift = max(0,min(12, 12-int(math.log2(max(max_d/7.0,1.0)))))
                     scale = float(1<<(12-shift))
                     buf[boff]=(2<<4)|shift; buf[boff+1]=0x02
                     for i2 in range(28):
-                        s = src[idx] if idx<len(src) else 0.0; idx+=1
+                        s = src[idx] if idx<src_len else 0.0; idx+=1
                         pred=p1*_C1+p2*_C2
-                        raw=(s-pred)/scale if scale else 0
+                        raw=(s-pred)/scale if scale else 0.0
                         nib=max(-8,min(7,int(raw+(0.5 if raw>=0 else -0.5))))
-                        dec=max(-32768,min(32767,nib*scale+pred))
+                        dec=max(-32768.0,min(32767.0,nib*scale+pred))
+                        # Match the integer decoder: it outputs int16 and feeds that back.
+                        dec=float(int(dec+0.5) if dec>=0 else int(dec-0.5))
                         p2=p1; p1=dec
                         j=i2//2
                         if i2%2==0: buf[boff+2+j]=nib&0xF
@@ -253,16 +261,6 @@ def adpcm_slot_duration(slot_bytes, sample_rate=32000):
     n_superblocks = slot_bytes / 8192
     samples_per_ch = n_superblocks * (4096 / 16 * 28)
     return samples_per_ch / sample_rate
-
-
-def pcm_to_adpcm_size(pcm_bytes_stereo):
-    """Calculate how many ADPCM bytes are needed for this PCM data.
-    Must be multiple of 8192 (LLRR super-block size)."""
-    n_samples = len(pcm_bytes_stereo) // 2  # 16-bit samples
-    n_per_ch = n_samples // 2  # stereo
-    # Each super-block: 4096 bytes/ch = 256 blocks × 28 samples = 7168 samples
-    n_superblocks = (n_per_ch + 7167) // 7168
-    return n_superblocks * 8192
 
 
 def encode_psx_adpcm_sized(pcm_s16le_stereo, output_size):
@@ -317,13 +315,54 @@ def probe_metadata(filepath):
     return "", "", ""
 
 
+def _loudnorm_measure(source, target):
+    """Pass 1 of two-pass loudnorm: analyze the source and return the measured
+    loudness stats as a dict, or None on failure. No audio is produced."""
+    try:
+        import json
+        r = subprocess.run([
+            "ffmpeg", "-hide_banner", "-i", source,
+            "-af", f"loudnorm={target}:print_format=json",
+            "-f", "null", "-"
+        ], capture_output=True, text=True, timeout=300)
+        # The JSON report is printed as the last {...} block on stderr.
+        err = r.stderr or ""
+        start = err.rfind("{")
+        end = err.rfind("}")
+        if start != -1 and end > start:
+            return json.loads(err[start:end + 1])
+    except Exception:
+        pass
+    return None
+
+
+def _loudnorm_filter(target, measured):
+    """Build the loudnorm filter for the conversion pass. With valid pass-1
+    stats this is a precise linear normalization; otherwise it falls back to
+    single-pass dynamic loudnorm (still normalizes, just less precise)."""
+    if measured:
+        try:
+            i  = float(measured["input_i"])
+            tp = float(measured["input_tp"])
+            lra = float(measured["input_lra"])
+            th = float(measured["input_thresh"])
+            off = float(measured["target_offset"])
+            if all(math.isfinite(v) for v in (i, tp, lra, th, off)):
+                return (f"loudnorm={target}"
+                        f":measured_I={i}:measured_TP={tp}:measured_LRA={lra}"
+                        f":measured_thresh={th}:offset={off}:linear=true")
+        except (KeyError, ValueError, TypeError):
+            pass
+    return f"loudnorm={target}"
+
+
 # ─── GLOBALUS.BIN String Table ──────────────────────────────────────────
-# Music strings in DATA/GLOBALUS.BIN are UTF-16LE, null-terminated
-# They start at ~0xB800. The pattern is groups of 3: title, album, artist
-# Each song maps to 3 string indices. Strings can only be replaced with
-# equal or shorter text (pad with null bytes).
-GLOBALUS_STRINGS_START = 0xB800
-GLOBALUS_FILENAME = "GLOBALUS.BIN"
+# Music strings in DATA/GLOBALUS.BIN are UTF-16LE, null-terminated.
+# Slots 1-40 live near 0xB700 in groups of 3 (title, album, artist); slots
+# 41-44 live in a second region near 0x2C004. The game finds each string
+# through a fixed pointer table (u32 offsets, e.g. at 0x784 for the music
+# block), so strings must be patched IN PLACE — same offset, same byte length
+# (truncate/null-pad). Moving them would invalidate the pointers.
 
 
 # ─── RWS Parser ───────────────────────────────────────────────────────────
@@ -548,12 +587,11 @@ class InjectionWorker(QObject):
     log_line = Signal(str)
     finished = Signal(bool, str)
 
-    def __init__(self, iso_path, assignments, output_iso, iso_builder, metadata=None):
+    def __init__(self, iso_path, assignments, output_iso, metadata=None):
         super().__init__()
         self.iso_path = iso_path
         self.assignments = assignments
         self.output_iso = output_iso
-        self.iso_builder = iso_builder
         self.metadata = metadata or {}  # slot_id -> (title, artist, album)
 
     def _find_file_offset_iso9660(self, iso_data, filename_upper):
@@ -808,9 +846,16 @@ class InjectionWorker(QObject):
         return tracks, sample_rate, num_channels
 
     def _patch_globalus_bin(self, output_iso, iso_data, metadata):
-        """Patch song names with DYNAMIC string redistribution.
-        The game uses string TABLE INDICES (not byte offsets), so we can freely
-        resize strings as long as total fits within the fixed region."""
+        """Patch song names IN PLACE, at fixed byte length.
+
+        The game finds each name through a fixed pointer table (u32 offsets, e.g.
+        the music block at 0x784 points at the strings near 0xB700). Repacking the
+        strings to different lengths would move them out from under those pointers,
+        which is why the old 'dynamic redistribution' showed garbled / mismatched
+        names. So every field is written at its ORIGINAL offset, truncated to the
+        original byte length and null-padded — offsets never move, pointers stay
+        valid. Names longer than the original field are truncated (matches the
+        per-field character limits shown in the UI)."""
         offset, size = self._find_file_offset_iso9660(iso_data, "GLOBALUS.BIN")
         if not offset or not size:
             self.log_line.emit("  ⚠ GLOBALUS.BIN not found, skipping name patching")
@@ -836,94 +881,50 @@ class InjectionWorker(QObject):
                 pos += 2
             return table
 
-        def rewrite_region(data, orig_strings, n_strings, region_start, region_bytes,
-                           slot_start, meta, log_fn):
-            """Rewrite a string region with dynamic redistribution.
-            Never writes beyond region_start + region_bytes."""
-            # Build new text list
-            new_texts = []
-            for i in range(n_strings):
-                slot_id = slot_start + i // 3
-                field = i % 3  # 0=title, 1=album, 2=artist
-                if slot_id in meta:
-                    t, ar, al = meta[slot_id]
-                    if field == 0 and t: new_texts.append(t)
-                    elif field == 1 and al: new_texts.append(al)
-                    elif field == 2 and ar: new_texts.append(ar)
-                    else: new_texts.append(orig_strings[i][1] if i < len(orig_strings) else "")
-                else:
-                    new_texts.append(orig_strings[i][1] if i < len(orig_strings) else "")
+        def write_field(s_off, max_bytes, text):
+            """Overwrite the field at s_off with text truncated to max_bytes
+            (whole UTF-16 code units) and null-padded. The string's offset and the
+            terminator after it are never touched."""
+            enc = text.encode('utf-16-le')[:max_bytes]
+            enc = enc[:len(enc) // 2 * 2]
+            gdata[s_off:s_off + len(enc)] = enc
+            if len(enc) < max_bytes:
+                gdata[s_off + len(enc):s_off + max_bytes] = b'\x00' * (max_bytes - len(enc))
 
-            encoded = [t.encode('utf-16-le') for t in new_texts]
-            total = sum(len(e) + 2 for e in encoded)
-
-            # Scale down if overflow
-            if total > region_bytes:
-                avail_content = region_bytes - n_strings * 2
-                total_content = sum(len(e) for e in encoded)
-                if total_content > 0:
-                    scale = avail_content / total_content
-                    log_fn(f"  ↳ Strings scaled to ~{scale*100:.0f}% to fit region ({region_bytes}B)")
-                    for i in range(len(encoded)):
-                        mx = int(len(encoded[i]) * scale) // 2 * 2
-                        if mx < 2: mx = 2
-                        encoded[i] = encoded[i][:mx]
-
-            # Write strings with hard boundary check
-            count = 0
-            wp = region_start
-            for i, enc in enumerate(encoded):
-                end = wp + len(enc)
-                # HARD STOP: never exceed region boundary
-                if end + 2 > region_start + region_bytes:
-                    avail = region_start + region_bytes - wp - 2
-                    avail = (avail // 2) * 2
-                    if avail < 0: avail = 0
-                    enc = enc[:avail]
-                    end = wp + len(enc)
-                data[wp:end] = enc
-                data[end] = 0; data[end+1] = 0
-                wp = end + 2
-                if i < len(orig_strings) and orig_strings[i][1] != new_texts[i]:
-                    count += 1
-
-            # Zero-fill remaining space
-            if wp < region_start + region_bytes:
-                data[wp:region_start + region_bytes] = b'\x00' * (region_start + region_bytes - wp)
-            return count
+        def patch_slot(st_table, base, slot_id):
+            """Patch one slot's (title, album, artist) triple in place.
+            On-disk order is title, album, artist; metadata is (title, artist, album)."""
+            if base < 0 or base + 2 >= len(st_table):
+                return 0
+            title, artist, album = metadata[slot_id]
+            n = 0
+            for field, val in ((0, title), (1, album), (2, artist)):
+                if not val:
+                    continue
+                s_off, _, blen = st_table[base + field]
+                write_field(s_off, blen, val)
+                n += 1
+            return n
 
         patched = 0
+
+        # ═══ Slots 1-40: main region, strings index 3+, groups of 3 ═══
         st = parse_strings(gdata, 0xB700, 0xD000)
+        for slot_id in sorted(s for s in metadata if 1 <= s <= 40):
+            patched += patch_slot(st, 3 + (slot_id - 1) * 3, slot_id)  # MUSIC_START=3
 
-        # ═══ Slots 1-40: main region (120 strings) ═══
-        MUSIC_START = 3
-        N_MUSIC = 120
-        if any(sid <= 40 for sid in metadata) and len(st) > MUSIC_START + N_MUSIC:
-            region_start = st[MUSIC_START][0]
-            last = st[MUSIC_START + N_MUSIC - 1]
-            region_end = last[0] + last[2] + 2
-            music_strings = st[MUSIC_START:MUSIC_START + N_MUSIC]
-            patched += rewrite_region(gdata, music_strings, N_MUSIC,
-                                       region_start, region_end - region_start,
-                                       1, metadata, self.log_line.emit)
-
-        # ═══ Slots 41-44: second region (12 strings) ═══
-        slots_41 = {k: v for k, v in metadata.items() if 41 <= k <= 44}
-        if slots_41:
+        # ═══ Slots 41-44: second region at 0x2C004 ═══
+        slots_41_44 = sorted(s for s in metadata if 41 <= s <= 44)
+        if slots_41_44:
             st2 = parse_strings(gdata, 0x2C004, 0x2C200)
-            if len(st2) >= 12:
-                r2_start = st2[0][0]
-                r2_last = st2[11]
-                r2_end = r2_last[0] + r2_last[2] + 2
-                patched += rewrite_region(gdata, st2[:12], 12,
-                                           r2_start, r2_end - r2_start,
-                                           41, slots_41, self.log_line.emit)
+            for slot_id in slots_41_44:
+                patched += patch_slot(st2, (slot_id - 41) * 3, slot_id)
 
         if patched > 0:
             with open(output_iso, 'r+b') as f:
                 f.seek(offset)
                 f.write(gdata)
-            self.log_line.emit(f"  ✓ Patched {patched} strings (dynamic redistribution)")
+            self.log_line.emit(f"  ✓ Patched {patched} song-name fields (in-place, fixed length)")
         else:
             self.log_line.emit("  ↳ No song names to patch")
 
@@ -999,155 +1000,200 @@ class InjectionWorker(QObject):
 
             step += 1
 
-            # ═══ STEP 3: Encode all assigned songs to ADPCM temp files ═══
-            self.log_line.emit("▶ Converting songs to PS-ADPCM...")
+            # ═══ STEP 3: Convert all songs to PCM (parallel, loudness-matched) ═══
+            self.log_line.emit("▶ Converting songs to PCM (parallel, loudness-matched)...")
 
             # Split assignments by EATRAX: slots 1-22 → EATRAX0, 23-44 → EATRAX1
             ea0_assignments = {k: v for k, v in self.assignments.items() if k <= 22}
             ea1_assignments = {k: v for k, v in self.assignments.items() if k > 22}
 
-            # Encode all songs first (no truncation!)
-            encoded = {}  # slot_id -> (adpcm_file_path, adpcm_size, src_name, duration)
-            for slot_id, source in sorted(self.assignments.items()):
+            n_cores = os.cpu_count() or 4
+
+            def _convert(source, out_raw, loud=None, extra_pre="", duration=None):
+                """Loudness-measure (pass 1) + convert → s16le 32k stereo. Thread-safe:
+                only spawns ffmpeg subprocesses and touches its own out_raw file."""
+                if loud is None:
+                    loud = _loudnorm_filter(LOUDNORM_TARGET,
+                                            _loudnorm_measure(source, LOUDNORM_TARGET))
+                cmd = ["ffmpeg", "-y", "-i", source]
+                if duration is not None:
+                    cmd += ["-t", str(duration)]
+                cmd += ["-af", f"{loud},{extra_pre}{AUDIO_RESAMPLE_FILTER}",
+                        "-f", "s16le", "-acodec", "pcm_s16le",
+                        "-ar", "32000", "-ac", "2", out_raw]
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                ok = r.returncode == 0 and os.path.isfile(out_raw) and os.path.getsize(out_raw) > 0
+                return ok, loud
+
+            def _phase_a(item):
+                slot_id, source = item
                 src_name = os.path.basename(source)
-                self.progress.emit(step/total_steps, f"Converting {src_name}...")
-
                 temp_raw = os.path.join(tmp, f"t{slot_id:02d}.raw")
-                cv = subprocess.run([
-                    "ffmpeg", "-y", "-i", source,
-                    "-af", "lowpass=f=14000,aresample=resampler=soxr",
-                    "-f", "s16le", "-acodec", "pcm_s16le",
-                    "-ar", "32000", "-ac", "2", temp_raw
-                ], capture_output=True, text=True, timeout=300)
-
-                if cv.returncode != 0:
-                    self.log_line.emit(f"✗ Slot {slot_id:02d}: ffmpeg error")
-                    step += 1; continue
-                if not os.path.isfile(temp_raw) or os.path.getsize(temp_raw) == 0:
-                    self.log_line.emit(f"✗ Slot {slot_id:02d}: empty file")
-                    step += 1; continue
-
+                ok, loud = _convert(source, temp_raw)
+                if not ok:
+                    return slot_id, None, loud, src_name
                 pcm_size = os.path.getsize(temp_raw)
-                adpcm_size = pcm_to_adpcm_size(open(temp_raw, 'rb').read(4))
-                # Recalculate properly: pcm_size bytes = pcm_size/2 samples total
-                n_samples = pcm_size // 2
-                n_per_ch = n_samples // 2
+                n_per_ch = (pcm_size // 2) // 2  # s16le stereo
                 n_superblocks = (n_per_ch + 7167) // 7168
                 adpcm_size = n_superblocks * 8192
+                return (slot_id, (temp_raw, adpcm_size, src_name, adpcm_slot_duration(adpcm_size)),
+                        loud, src_name)
 
-                dur = adpcm_slot_duration(adpcm_size)
-                encoded[slot_id] = (temp_raw, adpcm_size, src_name, dur)
-                self.log_line.emit(f"  ✓ Slot {slot_id:02d}: {src_name} → {adpcm_size//1024}KB ({dur:.0f}s)")
-                step += 1
+            encoded = {}            # slot_id -> (temp_raw, adpcm_size, src_name, duration)
+            loud_filter_by_slot = {}
+            n_assign = len(self.assignments)
+            with ThreadPoolExecutor(max_workers=max(1, min(n_cores, n_assign))) as ex:
+                for fut in as_completed([ex.submit(_phase_a, it) for it in self.assignments.items()]):
+                    slot_id, data, loud, src_name = fut.result()
+                    loud_filter_by_slot[slot_id] = loud
+                    if data:
+                        encoded[slot_id] = data
+                        self.log_line.emit(
+                            f"  ✓ Slot {slot_id:02d}: {src_name} → {data[1]//1024}KB ({data[3]:.0f}s)"
+                        )
+                    else:
+                        self.log_line.emit(f"✗ Slot {slot_id:02d}: ffmpeg error")
+                    step += 1
+                    self.progress.emit(step/total_steps, f"Converting ({len(encoded)}/{n_assign})...")
 
             if not encoded:
                 raise Exception("No tracks were converted")
 
-            # ═══ STEP 4: Redistribute space and encode to ADPCM ═══
-            self.progress.emit(step/total_steps, "Building EATRAX...")
-            self.log_line.emit("▶ Redistributing track space and encoding")
+            # ═══ STEP 4: Plan track layout + proportional scaling (per EATRAX) ═══
+            self.progress.emit(step/total_steps, "Planning track layout...")
+            self.log_line.emit("▶ Planning layout and scaling")
 
+            plans = {}        # eatrax_name -> (new_track_sizes, new_track_data)
+            trunc_jobs = []   # scaled tracks that need an ffmpeg re-encode (fade-out + trim)
+
+            for eatrax_name, assignments, slot_start in [
+                ("_EATRAX0.RWS", ea0_assignments, 1),
+                ("_EATRAX1.RWS", ea1_assignments, 23),
+            ]:
+                if eatrax_name not in eatrax_info or not assignments:
+                    continue
+
+                ea = eatrax_info[eatrax_name]
+                orig_tracks = ea['tracks']
+                n_orig = len(orig_tracks)
+                available_audio = ea['total_audio']
+
+                assigned_need = {sid: encoded[sid][1] for sid in assignments if sid in encoded}
+                total_needed = sum(assigned_need.values())
+
+                total_unassigned = sum(orig_tracks[i][1] for i in range(n_orig)
+                                       if (slot_start + i) not in assignments)
+                space_for_custom = available_audio - total_unassigned
+                self.log_line.emit(
+                    f"  {eatrax_name}: {space_for_custom//1024}KB available for "
+                    f"{len(assigned_need)} custom tracks (need {total_needed//1024}KB)"
+                )
+
+                # If songs exceed the fixed space, scale all proportionally with fade-out
+                if total_needed > space_for_custom:
+                    overflow = total_needed - space_for_custom
+                    self.log_line.emit(
+                        f"  ⚠ Songs exceed space by {overflow//1024}KB, scaling down proportionally"
+                    )
+                    scale = space_for_custom / total_needed
+                    for sid in assigned_need:
+                        ns = (int(assigned_need[sid] * scale) // 8192) * 8192  # align super-block
+                        assigned_need[sid] = max(8192, ns)
+                    # Fine-tune: if still over, trim the largest one super-block at a time
+                    total_needed = sum(assigned_need.values())
+                    while total_needed > space_for_custom:
+                        biggest = max(assigned_need, key=assigned_need.get)
+                        assigned_need[biggest] = max(8192, assigned_need[biggest] - 8192)
+                        total_needed = sum(assigned_need.values())
+
+                    # Queue the truncated tracks for a parallel fade-out re-encode
+                    for sid in sorted(assigned_need):
+                        _, orig_adpcm_size, src_name, _ = encoded[sid]
+                        new_size = assigned_need[sid]
+                        if new_size >= orig_adpcm_size:
+                            continue  # no truncation needed
+                        new_dur = adpcm_slot_duration(new_size)
+                        fade_dur = 3
+                        trunc_jobs.append({
+                            'sid': sid, 'source': self.assignments[sid],
+                            'raw': os.path.join(tmp, f"t{sid:02d}_trunc.raw"),
+                            'size': new_size, 'dur': new_dur, 'src_name': src_name,
+                            'fade_start': max(0, new_dur - fade_dur), 'fade_dur': fade_dur,
+                            'loud': loud_filter_by_slot.get(sid) or f"loudnorm={LOUDNORM_TARGET}",
+                        })
+
+                new_track_sizes, new_track_data = [], []
+                for i in range(n_orig):
+                    sid = slot_start + i
+                    if sid in assigned_need:
+                        new_track_sizes.append(assigned_need[sid]); new_track_data.append((sid, True))
+                    else:
+                        new_track_sizes.append(orig_tracks[i][1]); new_track_data.append((sid, False))
+                plans[eatrax_name] = (new_track_sizes, new_track_data)
+
+            # Re-encode scaled tracks in parallel (fade-out + trim)
+            if trunc_jobs:
+                self.log_line.emit(f"▶ Re-encoding {len(trunc_jobs)} scaled tracks (parallel)...")
+
+                def _do_trunc(job):
+                    fade = f"afade=t=out:st={job['fade_start']:.1f}:d={job['fade_dur']},"
+                    ok, _ = _convert(job['source'], job['raw'], loud=job['loud'],
+                                     extra_pre=fade, duration=job['dur'])
+                    return job, ok
+
+                with ThreadPoolExecutor(max_workers=max(1, min(n_cores, len(trunc_jobs)))) as ex:
+                    for fut in as_completed([ex.submit(_do_trunc, j) for j in trunc_jobs]):
+                        job, ok = fut.result()
+                        if ok:
+                            encoded[job['sid']] = (job['raw'], job['size'], job['src_name'], job['dur'])
+                            self.log_line.emit(
+                                f"  ↳ Slot {job['sid']:02d}: {job['src_name']} scaled to "
+                                f"{job['dur']:.0f}s ({job['size']//1024}KB)"
+                            )
+
+            # ═══ STEP 5: Encode all custom tracks to PS-ADPCM in parallel ═══
+            self.progress.emit(step/total_steps, "Encoding PS-ADPCM...")
+            self.log_line.emit("▶ Encoding PS-ADPCM (parallel — all cores)")
+
+            encode_targets = {}  # slot_id -> target byte size
+            for sizes, data in plans.values():
+                for (sid, is_custom), sz in zip(data, sizes):
+                    if is_custom and sid in encoded:
+                        encode_targets[sid] = sz
+
+            adpcm_by_slot = {}
+
+            def _encode_one(sid):
+                with open(encoded[sid][0], 'rb') as af:
+                    pcm = af.read()
+                return sid, encode_psx_adpcm_sized(pcm, encode_targets[sid])
+
+            if encode_targets:
+                done_enc = 0
+                with ThreadPoolExecutor(max_workers=max(1, min(n_cores, len(encode_targets)))) as ex:
+                    for fut in as_completed([ex.submit(_encode_one, sid) for sid in encode_targets]):
+                        sid, audio = fut.result()
+                        adpcm_by_slot[sid] = audio
+                        done_enc += 1
+                        self.progress.emit(step/total_steps,
+                                           f"Encoding ({done_enc}/{len(encode_targets)})...")
+            step += 1
+
+            # ═══ STEP 6: Write patched ISO (sequential, in-order) ═══
+            self.log_line.emit("▶ Writing patched EATRAX containers")
             replaced = 0
             with open(self.output_iso, 'r+b') as iso_out:
                 for eatrax_name, assignments, slot_start in [
                     ("_EATRAX0.RWS", ea0_assignments, 1),
                     ("_EATRAX1.RWS", ea1_assignments, 23),
                 ]:
-                    if eatrax_name not in eatrax_info or not assignments:
+                    if eatrax_name not in plans:
                         continue
 
                     ea = eatrax_info[eatrax_name]
                     orig_tracks = ea['tracks']
                     n_orig = len(orig_tracks)
-                    available_audio = ea['total_audio']
-
-                    # Calculate how much space assigned songs need
-                    assigned_need = {}
-                    for sid in sorted(assignments.keys()):
-                        if sid in encoded:
-                            _, asz, _, _ = encoded[sid]
-                            assigned_need[sid] = asz
-
-                    total_needed = sum(assigned_need.values())
-
-                    # Space for unassigned slots (keep original sizes)
-                    unassigned_slots = []
-                    for i in range(n_orig):
-                        sid = slot_start + i
-                        if sid not in assignments:
-                            unassigned_slots.append((sid, orig_tracks[i][1]))  # (slot_id, orig_size)
-
-                    total_unassigned = sum(s for _, s in unassigned_slots)
-
-                    space_for_custom = available_audio - total_unassigned
-                    self.log_line.emit(
-                        f"  {eatrax_name}: {space_for_custom//1024}KB available for "
-                        f"{len(assigned_need)} custom tracks (need {total_needed//1024}KB)"
-                    )
-
-                    # Check if songs fit. If not, scale all songs proportionally with fade out
-                    if total_needed > space_for_custom:
-                        overflow = total_needed - space_for_custom
-                        self.log_line.emit(
-                            f"  ⚠ Songs exceed space by {overflow//1024}KB, scaling down proportionally"
-                        )
-                        # Scale factor: how much of each song we can keep
-                        scale = space_for_custom / total_needed
-                        
-                        for sid in sorted(assigned_need.keys()):
-                            orig_size = assigned_need[sid]
-                            new_size = int(orig_size * scale)
-                            new_size = (new_size // 8192) * 8192  # align to super-block
-                            if new_size < 8192:
-                                new_size = 8192
-                            assigned_need[sid] = new_size
-                        
-                        # Fine-tune: if we're still over, trim the largest one by one
-                        total_needed = sum(assigned_need.values())
-                        while total_needed > space_for_custom:
-                            biggest_sid = max(assigned_need, key=assigned_need.get)
-                            assigned_need[biggest_sid] -= 8192
-                            if assigned_need[biggest_sid] < 8192:
-                                assigned_need[biggest_sid] = 8192
-                            total_needed = sum(assigned_need.values())
-                        
-                        # Re-encode truncated songs with fade out
-                        for sid in sorted(assigned_need.keys()):
-                            _, orig_adpcm_size, src_name, orig_dur = encoded[sid]
-                            new_size = assigned_need[sid]
-                            if new_size >= orig_adpcm_size:
-                                continue  # no truncation needed
-                            
-                            new_dur = adpcm_slot_duration(new_size)
-                            fade_dur = 3
-                            fade_start = max(0, new_dur - fade_dur)
-                            source = self.assignments[sid]
-                            temp_raw = os.path.join(tmp, f"t{sid:02d}_trunc.raw")
-                            subprocess.run([
-                                "ffmpeg", "-y", "-i", source,
-                                "-t", str(new_dur),
-                                "-af", f"afade=t=out:st={fade_start:.1f}:d={fade_dur},lowpass=f=14000,aresample=resampler=soxr",
-                                "-f", "s16le", "-acodec", "pcm_s16le",
-                                "-ar", "32000", "-ac", "2", temp_raw
-                            ], capture_output=True, text=True, timeout=300)
-                            encoded[sid] = (temp_raw, new_size, src_name, new_dur)
-                            self.log_line.emit(
-                                f"  ↳ Slot {sid:02d}: {src_name} scaled to {new_dur:.0f}s ({new_size//1024}KB)"
-                            )
-
-                    # Now build the track layout: assigned slots get their custom size,
-                    # unassigned slots keep original size
-                    new_track_sizes = []
-                    new_track_data = []  # (slot_id, is_custom)
-
-                    for i in range(n_orig):
-                        sid = slot_start + i
-                        if sid in assigned_need:
-                            new_track_sizes.append(assigned_need[sid])
-                            new_track_data.append((sid, True))
-                        else:
-                            new_track_sizes.append(orig_tracks[i][1])
-                            new_track_data.append((sid, False))
+                    new_track_sizes, new_track_data = plans[eatrax_name]
 
                     # Find the track table in the RWS header to patch it
                     iso_out.seek(ea['iso_offset'])
@@ -1204,27 +1250,22 @@ class InjectionWorker(QObject):
                     # Write audio data chunk header with new size
                     iso_out.write(struct.pack('<III', 0x080F, new_total_audio, 0x1C020009))
 
-                    # Write track audio data in order
+                    # Write track audio data in order (custom = pre-encoded, else original)
                     for i, (sid, is_custom) in enumerate(new_track_data):
                         self.progress.emit(step/total_steps, f"Writing track {sid}...")
 
-                        if is_custom and sid in encoded:
-                            temp_raw, adpcm_size, src_name, dur = encoded[sid]
-
-                            # Read PCM and encode
-                            with open(temp_raw, 'rb') as af:
-                                pcm_data = af.read()
-
-                            target_size = new_track_sizes[i]
-                            audio = encode_psx_adpcm_sized(pcm_data, target_size)
+                        if is_custom:
+                            audio = adpcm_by_slot.get(sid)
+                            if audio is None:
+                                # Defensive fallback: encode synchronously
+                                with open(encoded[sid][0], 'rb') as af:
+                                    audio = encode_psx_adpcm_sized(af.read(), new_track_sizes[i])
                             iso_out.write(audio)
-
                             self.log_line.emit(
-                                f"✓ Slot {sid:02d}: {html_mod.escape(src_name)} → "
-                                f"{target_size//1024}KB ({adpcm_slot_duration(target_size):.0f}s)"
+                                f"✓ Slot {sid:02d}: {html_mod.escape(encoded[sid][2])} → "
+                                f"{new_track_sizes[i]//1024}KB ({adpcm_slot_duration(new_track_sizes[i]):.0f}s)"
                             )
                             replaced += 1
-                            step += 1
                         else:
                             # Write pre-read original track data
                             iso_out.write(orig_track_data[i])
@@ -1269,6 +1310,67 @@ class InjectionWorker(QObject):
         finally:
             if tmp and os.path.isdir(tmp):
                 shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ─── Expansion Worker (HostFS — add NEW tracks beyond 44) ──────────────────
+class ExpansionWorker(QObject):
+    log_line = Signal(str)
+    finished = Signal(bool, str)
+
+    def __init__(self, hostfs_dir, slots, cheats_dir):
+        super().__init__()
+        self.hostfs_dir = hostfs_dir
+        self.slots = slots          # list: None (keep original) or {song,title,artist,album}
+        self.cheats_dir = cheats_dir
+
+    def run(self):
+        try:
+            import eatrax_expansion as ee
+            res = ee.build_soundtrack(self.hostfs_dir, self.slots,
+                                      cheats_dir=self.cheats_dir, log=self.log_line.emit,
+                                      progress=self.log_line.emit)
+            n = res["count"]; custom = res["custom"]
+            files = ", ".join(f"_eatrax{f}.rws" for f in res["files"]) or "(originals untouched)"
+            msg = (f"Soundtrack built: {n} track(s) total — {custom} custom, {n-custom} original.\n"
+                   f"Rebuilt: {files}\n"
+                   f"Names + GLOBALUS rebuilt; pnach: {res.get('pnach_path') or '(no PCSX2 cheats dir found — pnach not written)'}\n\n"
+                   "In PCSX2 enable cheats: [HostFS] + [ELF Code Cave] + [EATRAX expansion], "
+                   "then boot the ISO from the HostFS (ciopfs) mount.")
+            self.log_line.emit("✓ Done.")
+            self.finished.emit(True, msg)
+        except Exception as e:
+            self.finished.emit(False, str(e))
+
+
+class PortableIsoWorker(QObject):
+    """Bake a self-contained ISO (no cheats, no HostFS) via surgical EATRAX/globalus relocation."""
+    log_line = Signal(str)
+    finished = Signal(bool, str)
+
+    def __init__(self, clean_iso, out_iso, slots):
+        super().__init__()
+        self.clean_iso = clean_iso; self.out_iso = out_iso; self.slots = slots
+
+    def run(self):
+        try:
+            import importlib.util
+            here = os.path.dirname(os.path.abspath(__file__))
+            spec = importlib.util.spec_from_file_location(
+                "build_portable_iso", os.path.join(here, "research", "build_portable_iso.py"))
+            bp = importlib.util.module_from_spec(spec); spec.loader.exec_module(bp)
+            res = bp.build_portable_iso(self.clean_iso, self.out_iso, self.slots,
+                                        log=self.log_line.emit, progress=self.log_line.emit)
+            mb = res["size"] // (1024 * 1024)
+            files = ", ".join(f"_eatrax{f}.rws" for f in res["files"])
+            msg = (f"Portable ISO built — {res['custom']} full-length custom track(s) ({mb} MB).\n"
+                   f"Rebuilt: {files}\n{self.out_iso}\n\n"
+                   "Self-contained: NO cheats, NO HostFS. Boots in PCSX2, Android "
+                   "(AetherSX2/NetherSX2) and real PS2 — just load this ISO.")
+            self.log_line.emit("✓ Done.")
+            self.finished.emit(True, msg)
+        except Exception as e:
+            import traceback
+            self.finished.emit(False, f"{e}\n{traceback.format_exc()[-600:]}")
 
 
 # ─── Main Window ──────────────────────────────────────────────────────────
@@ -1316,6 +1418,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.tabs, 1)
         self.tabs.addTab(self._build_iso_tab(), "📀  ISO + FILESYSTEM")
         self.tabs.addTab(self._build_tracks_tab(), "🎵  ASSIGN TRACKS")
+        self.tabs.addTab(self._build_soundtrack_tab(), "🎶  SOUNDTRACK")
         self.tabs.addTab(self._build_process_tab(), "🔧  PROCESS")
         self.tabs.addTab(self._build_info_tab(), "📖  GUIDE")
 
@@ -1621,14 +1724,14 @@ class MainWindow(QMainWindow):
             self.table.setCellWidget(row, 6, b)
 
     def _set_limited_text(self, row, col, text, max_chars):
-        """Set cell text with color-coding. With dynamic redistribution,
-        the limit is soft — text can exceed the original field size as long as
-        the total region budget allows it."""
+        """Set cell text with color-coding. The limit is HARD: names are written
+        in place at the original field's byte length, so anything longer than
+        max_chars is truncated in-game."""
         item = QTableWidgetItem(text)
         if len(text) > max_chars:
-            # Exceeds original field size but may still fit with redistribution
+            # Exceeds the original field length — will be truncated in-game
             item.setForeground(QColor("#ffaa00"))
-            item.setToolTip(f"↔ Exceeds original ({len(text)}/{max_chars} chars) — space will be redistributed from shorter fields")
+            item.setToolTip(f"⚠ Too long ({len(text)}/{max_chars} chars) — will be truncated to {max_chars}")
         else:
             item.setForeground(QColor("#4fc3f7"))
             item.setToolTip(f"✓ Fits ({len(text)}/{max_chars} chars)")
@@ -1706,10 +1809,265 @@ class MainWindow(QMainWindow):
         for s in list(self.assignments.keys()): self._upd_row(s)
         self.assignments.clear(); self._update_inject_btn()
 
+    # ─── SOUNDTRACK tab (HostFS — full soundtrack: replace any of 44 + add beyond) ──
+    def _build_soundtrack_tab(self):
+        w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(16,16,16,16); lay.setSpacing(10)
+        note = QLabel("Full soundtrack via HostFS — replace any of the 44 originals AND add as many new "
+                      "tracks as you want, all FULL-LENGTH (no fade/truncation), with unlimited names "
+                      "(auto-romanized from any language).\n"
+                      "The 44 originals are pre-loaded. Drop/assign a song onto a slot to replace it, or add "
+                      "new ones below; untouched slots keep the original game track. Limited only by disk space.\n"
+                      "Writes _eatraxN.rws + names into the extracted-disc folder + a PCSX2 .pnach. "
+                      "Requires cheats [HostFS] + [ELF Code Cave] + [EATRAX expansion].")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#888;font-size:11px;padding:10px;background:rgba(255,140,0,0.05);border:1px solid #222;border-radius:8px")
+        lay.addWidget(note)
+
+        self.exp_folder = os.path.expanduser("~/burnout3_hostfs")
+        fr = QHBoxLayout()
+        self.lbl_expfolder = QLabel(f"HostFS folder: {self.exp_folder}")
+        self.lbl_expfolder.setStyleSheet("color:#4fc3f7;font-size:11px")
+        fr.addWidget(self.lbl_expfolder, 1)
+        bf = QPushButton("📂 HostFS folder"); bf.clicked.connect(self._st_choose_folder); fr.addWidget(bf)
+        lay.addLayout(fr)
+
+        tb = QHBoxLayout()
+        bl = QPushButton("📁 Load folder (replace from #1)"); bl.clicked.connect(self._st_load_folder); tb.addWidget(bl)
+        ba = QPushButton("➕ Add songs (append)"); ba.clicked.connect(self._st_add_songs); tb.addWidget(ba)
+        br = QPushButton("➖ Remove / reset selected"); br.setObjectName("dangerBtn"); br.clicked.connect(self._st_remove_selected); tb.addWidget(br)
+        bz = QPushButton("↺ Reset all"); bz.setObjectName("dangerBtn"); bz.clicked.connect(self._st_reset_all); tb.addWidget(bz)
+        tb.addStretch()
+        self.lbl_expcount = QLabel(""); self.lbl_expcount.setStyleSheet("color:#ff8c00;font-weight:bold"); tb.addWidget(self.lbl_expcount)
+        lay.addLayout(tb)
+
+        self.exp_table = TrackTable(0, 6)
+        self.exp_table.setHorizontalHeaderLabels(["#","SONG","TITLE","ARTIST","ALBUM","⟳"])
+        self.exp_table.setAlternatingRowColors(True)
+        self.exp_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.exp_table.verticalHeader().setVisible(False)
+        self.exp_table.files_dropped.connect(self._st_add_songs_paths)
+        h = self.exp_table.horizontalHeader()
+        for i,(m,wd) in enumerate([(QHeaderView.ResizeMode.Fixed,44),(QHeaderView.ResizeMode.Stretch,0),
+            (QHeaderView.ResizeMode.Interactive,160),(QHeaderView.ResizeMode.Interactive,150),
+            (QHeaderView.ResizeMode.Interactive,130),(QHeaderView.ResizeMode.Fixed,40)]):
+            h.setSectionResizeMode(i,m)
+            if wd: self.exp_table.setColumnWidth(i,wd)
+        lay.addWidget(self.exp_table, 1)
+
+        self.btn_build_iso = QPushButton("💿  BUILD PORTABLE ISO   —   no cheats · runs on PCSX2 / Android / PS2")
+        self.btn_build_iso.setObjectName("primaryBtn"); self.btn_build_iso.setMinimumHeight(46)
+        self.btn_build_iso.clicked.connect(self._st_build_portable)
+        lay.addWidget(self.btn_build_iso)
+        self.btn_build_exp = QPushButton("🛠  BUILD HostFS folder   —   +tracks beyond 44 · needs PCSX2 cheats")
+        self.btn_build_exp.setMinimumHeight(38)
+        self.btn_build_exp.clicked.connect(self._st_build)
+        lay.addWidget(self.btn_build_exp)
+        self.exp_log = QTextEdit(); self.exp_log.setReadOnly(True); self.exp_log.setMaximumHeight(120); lay.addWidget(self.exp_log)
+        self._st_reset_all()
+        return w
+
+    def _st_choose_folder(self):
+        d = QFileDialog.getExistingDirectory(self, "Select HostFS folder (extracted disc)", self.exp_folder)
+        if d:
+            self.exp_folder = d; self.lbl_expfolder.setText(f"HostFS folder: {d}")
+
+    def _st_romanizer(self):
+        try:
+            import eatrax_expansion as ee; return ee.romanize
+        except Exception:
+            return lambda x: x
+
+    def _st_row_of(self, widget):
+        for r in range(self.exp_table.rowCount()):
+            if self.exp_table.cellWidget(r, 5) is widget: return r
+        return -1
+
+    def _st_insert_row(self, r):
+        self.exp_table.insertRow(r)
+        num = QTableWidgetItem(str(r + 1)); num.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        num.setForeground(QColor("#666")); num.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.exp_table.setItem(r, 0, num)
+        b = QPushButton("📁"); b.setFixedHeight(24); b.setToolTip("Replace this slot's song")
+        b.setStyleSheet("font-size:11px;padding:1px;border-radius:4px")
+        b.clicked.connect(lambda _, btn=b: self._st_replace_row(self._st_row_of(btn)))
+        self.exp_table.setCellWidget(r, 5, b)
+        self.exp_table.setRowHeight(r, 30)
+
+    def _st_set_keep(self, r, slot_idx):
+        s = EA_TRAX_SONGS[slot_idx] if slot_idx < len(EA_TRAX_SONGS) else {"artist": "", "title": ""}
+        song = QTableWidgetItem(f"♪ {s['artist']} — {s['title']}  (original)")
+        song.setFlags(Qt.ItemFlag.ItemIsEnabled); song.setForeground(QColor("#777"))
+        song.setData(Qt.ItemDataRole.UserRole, None)
+        self.exp_table.setItem(r, 1, song)
+        for col, val in [(2, s["title"]), (3, s["artist"]), (4, "")]:
+            it = QTableWidgetItem(val); it.setFlags(Qt.ItemFlag.ItemIsEnabled); it.setForeground(QColor("#666"))
+            self.exp_table.setItem(r, col, it)
+
+    def _st_set_custom(self, r, path):
+        rom = self._st_romanizer()
+        ti, ar, al = probe_metadata(path)
+        if not ti: ti = os.path.splitext(os.path.basename(path))[0]
+        ti, ar, al = rom(ti), rom(ar), rom(al)
+        song = QTableWidgetItem("▶ " + os.path.basename(path))
+        song.setFlags(Qt.ItemFlag.ItemIsEnabled); song.setForeground(QColor("#69f0ae"))
+        song.setToolTip(path); song.setData(Qt.ItemDataRole.UserRole, path)
+        self.exp_table.setItem(r, 1, song)
+        for col, val in [(2, ti), (3, ar), (4, al)]:
+            it = QTableWidgetItem(val); it.setForeground(QColor("#4fc3f7")); self.exp_table.setItem(r, col, it)
+
+    def _st_replace_row(self, r):
+        if r < 0: return
+        exts = " *.".join(e.strip(".") for e in AUDIO_EXTENSIONS)
+        fp, _ = QFileDialog.getOpenFileName(self, f"Pick a song for slot #{r+1}", "", f"Audio (*.{exts})")
+        if fp:
+            self._st_set_custom(r, fp); self._st_update_count()
+
+    def _st_load_folder(self):
+        d = QFileDialog.getExistingDirectory(self, "Select a folder of songs (replaces from slot #1)")
+        if not d: return
+        fs = sorted(os.path.join(d, f) for f in os.listdir(d)
+                    if os.path.isfile(os.path.join(d, f)) and os.path.splitext(f)[1].lower() in AUDIO_EXTENSIONS)
+        if not fs:
+            QMessageBox.warning(self, "No audio", "No audio files found in that folder."); return
+        for i, fp in enumerate(fs):
+            if i >= self.exp_table.rowCount(): self._st_insert_row(self.exp_table.rowCount())
+            self._st_set_custom(i, fp)
+        self._st_renumber(); self._st_update_count()
+
+    def _st_add_songs(self):
+        exts = " *.".join(e.strip(".") for e in AUDIO_EXTENSIONS)
+        fs, _ = QFileDialog.getOpenFileNames(self, "Add songs (append as new tracks)", "", f"Audio (*.{exts})")
+        if fs: self._st_add_songs_paths(sorted(fs))
+
+    def _st_add_songs_paths(self, files):
+        for fp in files:
+            r = self.exp_table.rowCount(); self._st_insert_row(r); self._st_set_custom(r, fp)
+        self._st_renumber(); self._st_update_count()
+
+    def _st_remove_selected(self):
+        rows = sorted({i.row() for i in self.exp_table.selectedIndexes()}, reverse=True)
+        for r in rows:
+            if r >= len(EA_TRAX_SONGS): self.exp_table.removeRow(r)       # added track -> remove
+            else: self._st_set_keep(r, r)                                  # original slot -> reset
+        self._st_renumber(); self._st_update_count()
+
+    def _st_reset_all(self):
+        self.exp_table.setRowCount(0)
+        for i in range(len(EA_TRAX_SONGS)):
+            self._st_insert_row(i); self._st_set_keep(i, i)
+        self._st_update_count()
+
+    def _st_renumber(self):
+        for r in range(self.exp_table.rowCount()):
+            it = self.exp_table.item(r, 0)
+            if it: it.setText(str(r + 1))
+
+    def _st_update_count(self):
+        n = self.exp_table.rowCount()
+        custom = sum(1 for r in range(n)
+                     if self.exp_table.item(r, 1) and self.exp_table.item(r, 1).data(Qt.ItemDataRole.UserRole))
+        self.lbl_expcount.setText(f"{n} tracks · {custom} custom · {n - custom} original")
+
+    def _st_build(self):
+        n = self.exp_table.rowCount()
+        if not os.path.isdir(self.exp_folder):
+            QMessageBox.critical(self, "", "HostFS folder not found. Pick the extracted-disc folder."); return
+        if self.worker_thread and self.worker_thread.isRunning():
+            QMessageBox.warning(self, "", "Already processing."); return
+        if not self.deps.get("ffmpeg"):
+            QMessageBox.critical(self, "", "ffmpeg not found."); return
+        slots = []; custom = 0
+        for r in range(n):
+            si = self.exp_table.item(r, 1); fp = si.data(Qt.ItemDataRole.UserRole) if si else None
+            if fp and os.path.isfile(fp):
+                def cell(c): it = self.exp_table.item(r, c); return (it.text().strip() if it else "")
+                slots.append({"song": fp, "title": cell(2) or os.path.splitext(os.path.basename(fp))[0],
+                              "artist": cell(3), "album": cell(4)})
+                custom += 1
+            else:
+                slots.append(None)
+        if custom == 0:
+            QMessageBox.warning(self, "", "Assign at least one song (replace a slot or add new ones)."); return
+        cheats = os.path.expanduser("~/.var/app/net.pcsx2.PCSX2/config/PCSX2/cheats")
+        cheats = cheats if os.path.isdir(cheats) else None
+        self.btn_build_exp.setEnabled(False); self.btn_build_exp.setText("⏳ BUILDING..."); self.exp_log.clear()
+        self.worker_thread = QThread()
+        self.exp_worker = ExpansionWorker(self.exp_folder, slots, cheats)
+        self.exp_worker.moveToThread(self.worker_thread)
+        self.worker_thread.started.connect(self.exp_worker.run)
+        self.exp_worker.log_line.connect(self._st_log_line)
+        self.exp_worker.finished.connect(self._st_done)
+        self.exp_worker.finished.connect(self.worker_thread.quit)
+        self.exp_worker.finished.connect(lambda: setattr(self, "_prev_exp_worker", self.exp_worker))
+        self.worker_thread.start()
+
+    def _st_log_line(self, s):
+        c = "#69f0ae" if s.startswith("✓") else "#ff5252" if s.startswith("✗") else "#aaa"
+        self.exp_log.append(f'<span style="color:{c}">{html_mod.escape(s)}</span>')
+
+    def _st_done(self, ok, msg):
+        self.btn_build_exp.setEnabled(True)
+        self.btn_build_exp.setText("🛠  BUILD HostFS folder   —   +tracks beyond 44 · needs PCSX2 cheats")
+        if ok:
+            QMessageBox.information(self, "Soundtrack built!", msg)
+        else:
+            QMessageBox.critical(self, "Error", msg)
+
+    def _st_build_portable(self):
+        n = self.exp_table.rowCount()
+        if self.worker_thread and self.worker_thread.isRunning():
+            QMessageBox.warning(self, "", "Already processing."); return
+        if not self.deps.get("ffmpeg"):
+            QMessageBox.critical(self, "", "ffmpeg not found."); return
+        slots = []; custom = 0; beyond = 0
+        for r in range(n):
+            si = self.exp_table.item(r, 1); fp = si.data(Qt.ItemDataRole.UserRole) if si else None
+            if r >= 44:
+                if fp: beyond += 1
+                continue
+            if fp and os.path.isfile(fp):
+                def cell(c): it = self.exp_table.item(r, c); return (it.text().strip() if it else "")
+                slots.append({"song": fp, "title": cell(2) or os.path.splitext(os.path.basename(fp))[0],
+                              "artist": cell(3), "album": cell(4)}); custom += 1
+            else:
+                slots.append(None)
+        if custom == 0:
+            QMessageBox.warning(self, "", "Assign at least one song to one of the 44 slots."); return
+        if beyond > 0:
+            QMessageBox.information(self, "Portable ISO",
+                f"A portable ISO supports the 44 original slots only (for now).\nThe {beyond} track(s) "
+                "beyond slot 44 will be skipped — use BUILD HostFS for those.")
+        clean, _ = QFileDialog.getOpenFileName(self, "Select the CLEAN Burnout 3 ISO (source)", "", "ISO (*.iso)")
+        if not clean: return
+        out, _ = QFileDialog.getSaveFileName(self, "Save portable ISO as...",
+                                             os.path.expanduser("~/Burnout3_custom.iso"), "ISO (*.iso)")
+        if not out: return
+        if os.path.abspath(out) == os.path.abspath(clean):
+            QMessageBox.critical(self, "", "Output must be different from the source ISO."); return
+        self.btn_build_iso.setEnabled(False); self.btn_build_iso.setText("⏳  BUILDING ISO..."); self.exp_log.clear()
+        self.worker_thread = QThread()
+        self.iso_worker = PortableIsoWorker(clean, out, slots)
+        self.iso_worker.moveToThread(self.worker_thread)
+        self.worker_thread.started.connect(self.iso_worker.run)
+        self.iso_worker.log_line.connect(self._st_log_line)
+        self.iso_worker.finished.connect(self._st_iso_done)
+        self.iso_worker.finished.connect(self.worker_thread.quit)
+        self.iso_worker.finished.connect(lambda: setattr(self, "_prev_iso_worker", self.iso_worker))
+        self.worker_thread.start()
+
+    def _st_iso_done(self, ok, msg):
+        self.btn_build_iso.setEnabled(True)
+        self.btn_build_iso.setText("💿  BUILD PORTABLE ISO   —   no cheats · runs on PCSX2 / Android / PS2")
+        if ok:
+            QMessageBox.information(self, "Portable ISO built!", msg)
+        else:
+            QMessageBox.critical(self, "Error", msg)
+
     def _build_process_tab(self):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(24,24,24,24); lay.setSpacing(14)
         sp = QLabel("Conversion: Your audio → PS-ADPCM 32kHz Stereo (native PS2 format)\n"
-                     "⚡ Optimized C encoder — 25 combos per block\n"
+                     "⚡ Optimized C encoder — 25 combos per block · multicore (all CPU cores)\n"
+                     "🔊 Loudness matched to EA Trax (2-pass loudnorm ~-10 LUFS)\n"
                      "🎵 Proportional scaling when songs exceed available space")
         sp.setStyleSheet("color:#888;font-size:11px;padding:12px;background:rgba(255,140,0,0.05);border:1px solid #222;border-radius:8px")
         lay.addWidget(sp)
@@ -1766,7 +2124,7 @@ class MainWindow(QMainWindow):
         self.btn_inject.setEnabled(False); self.btn_inject.setText("⏳ PROCESSING...")
         self.pbar.setValue(0); self.log.clear()
         self.worker_thread = QThread()
-        self.worker = InjectionWorker(self.iso_path, dict(self.assignments), out, None, metadata)
+        self.worker = InjectionWorker(self.iso_path, dict(self.assignments), out, metadata)
         self.worker.moveToThread(self.worker_thread)
         self.worker_thread.started.connect(self.worker.run)
         self.worker.progress.connect(self._on_progress)
@@ -1824,6 +2182,8 @@ class MainWindow(QMainWindow):
         &nbsp;&nbsp;L[2048] L[2048] R[2048] R[2048]<br>
         Nibbles: first sample = LOW, second = HIGH<br>
         Encoder: <b style="color:#69f0ae">Optimized C</b> — 25 combos/block<br>
+        Pre-filter: lowpass 15.5kHz · soxr 28-bit resampler<br>
+        Loudness: <b style="color:#4fc3f7">2-pass loudnorm ~-10 LUFS</b> (matches EA Trax)<br>
         Compression: 3.5:1 (56 bytes PCM → 16 bytes ADPCM)</p>
         <h3 style="color:#ff8c00">Space &amp; Scaling</h3>
         <p style="color:#aaa">
@@ -1843,10 +2203,10 @@ class MainWindow(QMainWindow):
         SOUND/ → SFX .RWS</code></p>
         <h3 style="color:#ff8c00">Dependencies</h3>
         <p style="color:#aaa"><code style="color:#69f0ae">
-        <b>Arch:</b> sudo pacman -S ffmpeg p7zip gcc python-pyside6<br>
-        <b>Ubuntu:</b> sudo apt install ffmpeg p7zip-full gcc<br>
+        <b>Arch:</b> sudo pacman -S ffmpeg gcc python-pyside6<br>
+        <b>Ubuntu:</b> sudo apt install ffmpeg gcc<br>
         &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pip install PySide6<br>
-        <b>Windows:</b> Install Python, ffmpeg, 7zip, MinGW (gcc)</code></p>
+        <b>Windows:</b> Install Python, ffmpeg, MinGW (gcc)</code></p>
         </div>""")
         lay.addWidget(i); return w
 
