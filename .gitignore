@@ -17,3 +17,6 @@ Thumbs.db
 
 # Temp
 *.tmp
+
+# Local tooling
+.claude/

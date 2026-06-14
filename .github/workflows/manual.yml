@@ -21,7 +21,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install PySide6 pyinstaller numpy
+          pip install PySide6 pyinstaller
 
       - name: Build Linux executable
         run: |
@@ -58,7 +58,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install PySide6 pyinstaller numpy
+          pip install PySide6 pyinstaller
 
       - name: Build Windows executable
         run: |
