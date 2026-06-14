@@ -81,20 +81,19 @@ The C encoder (`psxadpcm.c`) auto-compiles on first run via `gcc`. If `gcc` is n
 ## 📖 How to Use
 
 1. **Load ISO** — Drag your Burnout 3: Takedown ISO (NTSC-U, SLUS-21050) to the ISO tab
-2. **Assign Music** — Go to ASSIGN TRACKS and drag audio files or folders
-3. **Edit Names** — Title, Artist, and Album columns auto-fill from file metadata. Edit as needed. Fields that exceed the character limit show in orange.
-4. **Inject** — Click "INJECT CUSTOM MUSIC" in the PROCESS tab
-5. **Play** — Load the `_custom.iso` in PCSX2
+2. **Assign Music** — Go to the **SOUNDTRACK** tab. The 44 originals are pre-loaded — assign a song to a slot to replace it, or add new ones. Title/Artist/Album auto-fill from metadata and auto-romanize.
+3. **Build** — Pick one of the three build buttons (see below)
+4. **Play** — Load the resulting ISO in PCSX2 (or, for HostFS, boot from the host folder)
 
 ## 🎶 Soundtrack Modes
 
-| Mode | Where | Tracks | Length | Names | Cheats? | Runs on |
-|------|-------|--------|--------|-------|---------|---------|
-| **Classic in-ISO** | `ASSIGN TRACKS` → `PROCESS` | 44 (replace) | fixed-slot (scaled) | original byte-length | none | PCSX2 / Android / PS2 |
-| **Portable full-length** ✨ | `SOUNDTRACK` → `💿 BUILD PORTABLE ISO` | 44 (replace) | **full** | **unlimited (romanized)** | none | PCSX2 / Android / PS2 |
-| **HostFS expansion** ✨ | `SOUNDTRACK` → `🛠 BUILD HostFS` | **N (add beyond 44)** | **full** | **unlimited (romanized)** | `[HostFS]` + `[ELF Code Cave]` + `[EATRAX expansion]` | PCSX2 (PC) |
+All three live in the single **`🎶 SOUNDTRACK`** tab (pre-loads the 44 originals; replace any, add beyond):
 
-**The `🎶 SOUNDTRACK` tab** pre-loads the 44 originals; assign a song to a slot to replace it (full-length), or add new ones below. Untouched slots keep the original game track. Then build a **portable ISO** (self-contained, no cheats) for up to 44, or a **HostFS folder + pnach** to go beyond 44.
+| Build button | Tracks | Length | Names | Cheats? | Runs on |
+|------|--------|--------|-------|---------|---------|
+| 📀 **BUILD IN-PLACE ISO** | 44 (replace) | fixed-slot (scaled) | original byte-length | none · preserves CRC | PCSX2 / Android / PS2 |
+| 💿 **BUILD PORTABLE ISO** ✨ | 44 (replace) | **full** | **unlimited (romanized)** | none | PCSX2 / Android / PS2 |
+| 🛠 **BUILD HostFS** ✨ | **N (add beyond 44)** | **full** | **unlimited (romanized)** | `[HostFS]` + `[ELF Code Cave]` + `[EATRAX expansion]` | PCSX2 (PC) |
 
 > **Why two builders?** Burnout 3 reads its loose disc files by **fixed LBA**, so a normal ISO rebuild black-screens. The portable builder works around this surgically (relocate only the path-opened EATRAX/GLOBALUS files to the disc end). Adding *new* files beyond 44 to the ISO isn't loadable by the game's CD path (it works via HostFS, which bypasses the disc filesystem) — so +tracks is HostFS-only for now. See [`BURNOUT3_EATRAX_HANDOFF.md`](BURNOUT3_EATRAX_HANDOFF.md) for the full reverse-engineering write-up.
 
