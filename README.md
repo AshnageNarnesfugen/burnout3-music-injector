@@ -54,6 +54,8 @@ Replace the EA Trax soundtrack with your own music. Supports MP3, FLAC, M4A, OGG
 ### Arch Linux
 ```bash
 sudo pacman -S ffmpeg gcc python-pyside6
+# optional, only for HostFS (+tracks): xorriso auto-extracts the disc, ciopfs gives case-insensitivity
+sudo pacman -S libisoburn   # provides xorriso   (ciopfs: build from https://repo.or.cz/ciopfs.git)
 ```
 
 ### Ubuntu / Debian

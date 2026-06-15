@@ -1383,6 +1383,71 @@ class PortableIsoWorker(QObject):
             self.finished.emit(False, f"{e}\n{traceback.format_exc()[-600:]}")
 
 
+class ExtractWorker(QObject):
+    """Extract a disc image to a HostFS folder (xorriso), lowercase names for ciopfs, drop a boot-ISO
+    symlink, and mount ciopfs if available. Runs once per folder; HostFS-only (Linux)."""
+    progress = Signal(str)
+    finished = Signal(bool, str)
+
+    def __init__(self, iso_path, out_dir):
+        super().__init__()
+        self.iso_path = iso_path; self.out_dir = out_dir
+
+    def run(self):
+        try:
+            if not shutil.which("xorriso"):
+                self.finished.emit(False, "xorriso not found — install it, or extract the ISO manually into the HostFS folder.")
+                return
+            os.makedirs(self.out_dir, exist_ok=True)
+            self.progress.emit("Extracting disc files → HostFS folder (one-time, ~1 min)…")
+            r = subprocess.run(["xorriso", "-indev", self.iso_path, "-osirrox", "on", "-extract", "/", self.out_dir],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                self.finished.emit(False, "xorriso extract failed:\n" + (r.stderr or "")[-400:]); return
+            # xorriso extracts read-only (mirrors the ISO); make writable so we can rename + the build can write
+            for root, dirs, files in os.walk(self.out_dir):
+                for nm in dirs + files:
+                    p = os.path.join(root, nm)
+                    try: os.chmod(p, os.stat(p).st_mode | 0o200)
+                    except OSError: pass
+            self.progress.emit("Lowercasing names for ciopfs…")
+            for root, _dirs, files in os.walk(self.out_dir, topdown=False):
+                for f in files:
+                    if f != f.lower():
+                        try: os.rename(os.path.join(root, f), os.path.join(root, f.lower()))
+                        except OSError: pass
+                if root != self.out_dir:
+                    p, n = os.path.split(root)
+                    if n != n.lower():
+                        try: os.rename(root, os.path.join(p, n.lower()))
+                        except OSError: pass
+            boot = os.path.join(self.out_dir, "boot.iso")     # PCSX2 host-root = booted ISO's dir; symlink, no 2.7GB copy
+            try:
+                if not os.path.exists(boot): os.symlink(self.iso_path, boot)
+            except OSError: pass
+            # ciopfs case-insensitive view for PCSX2 (Linux); best-effort
+            mnt = self.out_dir.rstrip("/") + "_ci"
+            ciopfs = shutil.which("ciopfs") or os.path.expanduser("~/.local/bin/ciopfs")
+            note = ""
+            if os.path.exists(ciopfs):
+                os.makedirs(mnt, exist_ok=True)
+                mounted = shutil.which("mountpoint") and subprocess.run(["mountpoint", "-q", mnt]).returncode == 0
+                if not mounted:
+                    self.progress.emit("Mounting ciopfs (case-insensitive view)…")
+                    mr = subprocess.run([ciopfs, self.out_dir, mnt], capture_output=True, text=True)
+                    mounted = mr.returncode == 0
+                    if not mounted:
+                        note = f"\n⚠ ciopfs mount failed — run manually: ciopfs '{self.out_dir}' '{mnt}'"
+                if mounted:
+                    note = f"\nIn PCSX2 boot: {os.path.join(mnt, 'boot.iso')} (ciopfs mount)"
+            else:
+                note = (f"\nciopfs not found (needed on Linux for case-insensitivity). Install it, then:\n"
+                        f"  ciopfs '{self.out_dir}' '{mnt}'  →  boot {os.path.join(mnt, 'boot.iso')} in PCSX2")
+            self.finished.emit(True, self.out_dir + note)
+        except Exception as e:
+            self.finished.emit(False, str(e))
+
+
 # ─── Main Window ──────────────────────────────────────────────────────────
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -1504,6 +1569,38 @@ class MainWindow(QMainWindow):
 
         self._update_inject_btn()
         self.tabs.setCurrentIndex(1)
+        self._maybe_auto_extract()
+
+    def _hostfs_ready(self, folder):
+        return (os.path.isfile(os.path.join(folder, "slus_210.50"))
+                and os.path.isdir(os.path.join(folder, "tracks"))
+                and os.path.isfile(os.path.join(folder, "data", "globalus.bin")))
+
+    def _maybe_auto_extract(self):
+        """On ISO load, auto-extract it to the HostFS folder if that folder isn't ready yet (one-time)."""
+        folder = self.exp_folder
+        if self._hostfs_ready(folder):
+            self.exp_log.append(f'<span style="color:#69f0ae">HostFS folder ready: {folder}</span>')
+            return
+        if getattr(self, "extract_thread", None) and self.extract_thread.isRunning():
+            return
+        self.exp_log.append(f'<span style="color:#aaa">Auto-extracting ISO → {folder} (one-time setup for HostFS)…</span>')
+        self.extract_thread = QThread()
+        self.extract_worker = ExtractWorker(self.iso_path, folder)
+        self.extract_worker.moveToThread(self.extract_thread)
+        self.extract_thread.started.connect(self.extract_worker.run)
+        self.extract_worker.progress.connect(self._st_log_line)
+        self.extract_worker.finished.connect(self._extract_done)
+        self.extract_worker.finished.connect(self.extract_thread.quit)
+        self.extract_worker.finished.connect(lambda: setattr(self, "_prev_extract", self.extract_worker))
+        self.extract_thread.start()
+
+    def _extract_done(self, ok, msg):
+        if ok:
+            self.exp_log.append(f'<span style="color:#69f0ae">✓ HostFS ready: {html_mod.escape(msg)}</span>')
+            self.lbl_expfolder.setText(f"HostFS folder: {self.exp_folder}")
+        else:
+            self.exp_log.append(f'<span style="color:#ff5252">✗ Auto-extract: {html_mod.escape(msg)}</span>')
 
     def _parse_globalus_limits(self, iso_path):
         """Parse GLOBALUS.BIN from ISO to find char limits and original names for each slot."""
@@ -2056,8 +2153,10 @@ class MainWindow(QMainWindow):
 
     def _st_build(self):
         n = self.exp_table.rowCount()
-        if not os.path.isdir(self.exp_folder):
-            QMessageBox.critical(self, "", "HostFS folder not found. Pick the extracted-disc folder."); return
+        if getattr(self, "extract_thread", None) and self.extract_thread.isRunning():
+            QMessageBox.information(self, "", "Still extracting the disc to the HostFS folder — wait for it to finish."); return
+        if not self._hostfs_ready(self.exp_folder):
+            QMessageBox.critical(self, "", "HostFS folder isn't ready (load the ISO so it auto-extracts, or pick the extracted-disc folder)."); return
         if self.worker_thread and self.worker_thread.isRunning():
             QMessageBox.warning(self, "", "Already processing."); return
         if not self.deps.get("ffmpeg"):
