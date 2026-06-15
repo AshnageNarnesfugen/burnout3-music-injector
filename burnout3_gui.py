@@ -1577,7 +1577,9 @@ class MainWindow(QMainWindow):
                 and os.path.isfile(os.path.join(folder, "data", "globalus.bin")))
 
     def _maybe_auto_extract(self):
-        """On ISO load, auto-extract it to the HostFS folder if that folder isn't ready yet (one-time)."""
+        """Auto-extract the loaded ISO into the HostFS folder if that folder isn't ready yet (one-time)."""
+        if not self.iso_path:
+            return
         folder = self.exp_folder
         if self._hostfs_ready(folder):
             self.exp_log.append(f'<span style="color:#69f0ae">HostFS folder ready: {folder}</span>')
@@ -1981,9 +1983,12 @@ class MainWindow(QMainWindow):
         return w
 
     def _st_choose_folder(self):
-        d = QFileDialog.getExistingDirectory(self, "Select HostFS folder (extracted disc)", self.exp_folder)
+        d = QFileDialog.getExistingDirectory(self, "Select / set the HostFS folder (existing or where to extract)",
+                                             self.exp_folder)
         if d:
             self.exp_folder = d; self.lbl_expfolder.setText(f"HostFS folder: {d}")
+            if self.iso_path:                 # use it if ready, else extract the loaded ISO there
+                self._maybe_auto_extract()
 
     def _detect_cheats_dir(self):
         """First existing PCSX2 'cheats' folder across common install layouts (Flatpak/native/Win/mac)."""
