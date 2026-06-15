@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QFileDialog, QProgressBar, QTextEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
     QTabWidget, QFrame, QGroupBox, QAbstractItemView, QTreeWidget,
-    QTreeWidgetItem, QSplitter, QListView, QTreeView
+    QTreeWidgetItem, QSplitter
 )
 from PySide6.QtCore import Qt, Signal, QObject, QThread
 from PySide6.QtGui import QColor, QPalette
@@ -572,11 +572,11 @@ class TrackTable(QTableWidget):
             p = u.toLocalFile()
             if os.path.isfile(p) and os.path.splitext(p)[1].lower() in AUDIO_EXTENSIONS:
                 files.append(p)
-            elif os.path.isdir(p):
-                for f in sorted(os.listdir(p)):
-                    fp = os.path.join(p, f)
-                    if os.path.isfile(fp) and os.path.splitext(f)[1].lower() in AUDIO_EXTENSIONS:
-                        files.append(fp)
+            elif os.path.isdir(p):                       # recurse so album/disc subfolders are included
+                for root, _dirs, fs in os.walk(p):
+                    for f in sorted(fs):
+                        if os.path.splitext(f)[1].lower() in AUDIO_EXTENSIONS:
+                            files.append(os.path.join(root, f))
         if files: self.files_dropped.emit(files)
         e.acceptProposedAction()
 
@@ -1948,7 +1948,7 @@ class MainWindow(QMainWindow):
         self._update_cheats_label()
 
         tb = QHBoxLayout()
-        bl = QPushButton("📁 Add folder(s)"); bl.clicked.connect(self._st_add_folders); tb.addWidget(bl)
+        bl = QPushButton("📁 Add folder"); bl.clicked.connect(self._st_add_folders); tb.addWidget(bl)
         ba = QPushButton("➕ Add songs"); ba.clicked.connect(self._st_add_songs); tb.addWidget(ba)
         br = QPushButton("➖ Remove / reset selected"); br.setObjectName("dangerBtn"); br.clicked.connect(self._st_remove_selected); tb.addWidget(br)
         bz = QPushButton("↺ Reset all"); bz.setObjectName("dangerBtn"); bz.clicked.connect(self._st_reset_all); tb.addWidget(bz)
@@ -2078,48 +2078,38 @@ class MainWindow(QMainWindow):
         return out
 
     def _st_add_folders(self):
-        """Pick one or MORE folders and APPEND all their audio to the list (never replaces)."""
-        dlg = QFileDialog(self, "Select folder(s) — Ctrl/Shift to pick several")
-        dlg.setFileMode(QFileDialog.FileMode.Directory)
-        dlg.setOption(QFileDialog.Option.DontUseNativeDialog, True)   # native dialogs can't multi-select dirs
-        dlg.setOption(QFileDialog.Option.ShowDirsOnly, True)
-        views = dlg.findChildren(QListView) + dlg.findChildren(QTreeView)
-        for v in views:
-            v.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        if not dlg.exec():
+        """Add ONE folder's audio (recursing). For several folders at once, drag them onto the table
+        (Qt's directory dialog can't reliably multi-select)."""
+        d = QFileDialog.getExistingDirectory(self, "Add a folder of songs  (tip: drag several folders onto the list)")
+        if not d:
             return
-        # In Directory mode selectedFiles() returns the *current* dir (that's why picking specific
-        # subfolders pulled the whole parent). Read the actually-highlighted items from the views instead,
-        # resolving each name against the current directory.
-        cwd = dlg.directory().absolutePath()
-        names = set()
-        for v in views:
-            sm = v.selectionModel()
-            if not sm:
-                continue
-            for idx in sm.selectedIndexes():
-                if idx.column() == 0:
-                    nm = idx.data(Qt.ItemDataRole.DisplayRole)
-                    if nm:
-                        names.add(nm)
-        folders = [d for d in (os.path.join(cwd, nm) for nm in names) if os.path.isdir(d)]
-        if not folders:                                  # nothing highlighted -> the single navigated dir
-            folders = [d for d in dlg.selectedFiles() if os.path.isdir(d)]
-        files = []
-        for d in folders:
-            files += self._st_folder_audio(d)
+        files = self._st_folder_audio(d)
         if not files:
-            QMessageBox.warning(self, "No audio", "No audio files found in the selected folder(s)."); return
-        self._st_add_songs_paths(files)   # APPEND to the end
+            QMessageBox.warning(self, "No audio", "No audio files found in that folder."); return
+        self._st_add_songs_paths(files)
 
     def _st_add_songs(self):
         exts = " *.".join(e.strip(".") for e in AUDIO_EXTENSIONS)
         fs, _ = QFileDialog.getOpenFileNames(self, "Add songs (append as new tracks)", "", f"Audio (*.{exts})")
         if fs: self._st_add_songs_paths(sorted(fs))
 
+    def _st_first_default_slot(self):
+        """First of the 44 slots still holding the original game track (not yet replaced), or None."""
+        for r in range(min(len(EA_TRAX_SONGS), self.exp_table.rowCount())):
+            it = self.exp_table.item(r, 1)
+            if it and it.data(Qt.ItemDataRole.UserRole) is None:
+                return r
+        return None
+
     def _st_add_songs_paths(self, files):
+        # Replace the default tracks first (fill from slot 1), then extend beyond 44 — so your songs
+        # become the soundtrack instead of piling up after the originals.
         for fp in files:
-            r = self.exp_table.rowCount(); self._st_insert_row(r); self._st_set_custom(r, fp)
+            slot = self._st_first_default_slot()
+            if slot is not None:
+                self._st_set_custom(slot, fp)
+            else:
+                r = self.exp_table.rowCount(); self._st_insert_row(r); self._st_set_custom(r, fp)
         self._st_renumber(); self._st_update_count()
 
     def _st_remove_selected(self):
