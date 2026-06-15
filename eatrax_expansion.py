@@ -25,6 +25,76 @@ BASEPTR_VA = 0x004A5A6C
 META_VA = 0x004A5600
 CAVE = 0x0016B4F0                                    # Nahelam code cave (legacy; needed [ELF Code Cave])
 META_NEW_VA = 0x00485894                             # free ELF zero-run (~6996B = 291 entries) -> NO cheat
+
+# [HostFS] patch — redirects the game's cdrom0: file I/O to a host folder (the gtfs*.irx modules it
+# uses are Criterion's, already present in every retail ISO). Patch authored by Nahelam
+# (https://github.com/Nahelam/PCSX2-HostFS-Patches); written out so users don't fetch it manually.
+HOSTFS_PNACH = """gametitle=Burnout 3: Takedown (SLUS-21050) [NTSC-U/C]
+
+[HostFS]
+author=Nehalem
+description=Load game files directly from a folder
+
+// jal to stub in _sceSifLoadModule
+patch=0,EE,20113DB8,extended,0C047C88
+
+// jal to stub in sceSifRebootIop
+patch=0,EE,20114574,extended,0060202D
+patch=0,EE,20114578,extended,0C047C88
+patch=0,EE,2011457C,extended,0200282D
+patch=0,EE,20114580,extended,10000005
+
+// Make room in sceCdInit
+patch=0,EE,2011F218,extended,03E00008
+patch=0,EE,2011F21C,extended,00000000
+
+// Path patching stub (cdrom -> host)
+patch=0,EE,2011F220,extended,3C021797
+patch=0,EE,2011F224,extended,8CAD000C
+patch=0,EE,2011F228,extended,3442979D
+patch=0,EE,2011F22C,extended,00021478
+patch=0,EE,2011F230,extended,64427473
+patch=0,EE,2011F234,extended,00021438
+patch=0,EE,2011F238,extended,64426F68
+patch=0,EE,2011F23C,extended,FC820000
+patch=0,EE,2011F240,extended,80A30008
+patch=0,EE,2011F244,extended,1060001F
+patch=0,EE,2011F248,extended,00000000
+patch=0,EE,2011F24C,extended,3C0C5346
+patch=0,EE,2011F250,extended,24020008
+patch=0,EE,2011F254,extended,24090010
+patch=0,EE,2011F258,extended,258C5447
+patch=0,EE,2011F25C,extended,240A003B
+patch=0,EE,2011F260,extended,1000000B
+patch=0,EE,2011F264,extended,240B005C
+patch=0,EE,2011F268,extended,106A0017
+patch=0,EE,2011F26C,extended,24420001
+patch=0,EE,2011F270,extended,146B0002
+patch=0,EE,2011F274,extended,00A24021
+patch=0,EE,2011F278,extended,2403002F
+patch=0,EE,2011F27C,extended,A0E30000
+patch=0,EE,2011F280,extended,00403025
+patch=0,EE,2011F284,extended,81030000
+patch=0,EE,2011F288,extended,1060000F
+patch=0,EE,2011F28C,extended,00000000
+patch=0,EE,2011F290,extended,00823821
+patch=0,EE,2011F294,extended,1449FFF4
+patch=0,EE,2011F298,extended,00403025
+patch=0,EE,2011F29C,extended,15ACFFF2
+patch=0,EE,2011F2A0,extended,00000000
+patch=0,EE,2011F2A4,extended,3C022C29
+patch=0,EE,2011F2A8,extended,64422497
+patch=0,EE,2011F2AC,extended,00021478
+patch=0,EE,2011F2B0,extended,64425453
+patch=0,EE,2011F2B4,extended,00021438
+patch=0,EE,2011F2B8,extended,64424F48
+patch=0,EE,2011F2BC,extended,03E00008
+patch=0,EE,2011F2C0,extended,FC820010
+patch=0,EE,2011F2C4,extended,24060008
+patch=0,EE,2011F2C8,extended,00862021
+patch=0,EE,2011F2CC,extended,03E00008
+patch=0,EE,2011F2D0,extended,A0800000
+"""
 TRACKS_PER_FILE = 22
 
 def _fo(va): return SEG_FO + (va - SEG_VA)
@@ -275,10 +345,13 @@ def build_soundtrack(hostfs_dir, slots, cheats_dir=None, log=print, progress=Non
         else:
             e = orig[g]; entries.append([g, 0, e[2], e[3], e[4], 0x0F])
     pnach = _gen_pnach(entries, N, log)
-    out_pnach = None
+    out_pnach = hostfs_pnach = None
     if cheats_dir and os.path.isdir(cheats_dir):
         out_pnach = os.path.join(cheats_dir, "BEBF8793_eatrax_expansion.pnach")
         open(out_pnach, "w").write(pnach)
         log(f"  pnach -> {out_pnach}")
-    return {"pnach": pnach, "pnach_path": out_pnach, "count": N,
+        hostfs_pnach = os.path.join(cheats_dir, "BEBF8793_hostfs.pnach")   # the [HostFS] loader (Nahelam)
+        open(hostfs_pnach, "w").write(HOSTFS_PNACH)
+        log(f"  pnach -> {hostfs_pnach}")
+    return {"pnach": pnach, "pnach_path": out_pnach, "hostfs_pnach_path": hostfs_pnach, "count": N,
             "files": sorted(files), "custom": len(custom), "first_id": base_id}

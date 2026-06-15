@@ -1331,20 +1331,21 @@ class ExpansionWorker(QObject):
                                       progress=self.log_line.emit)
             n = res["count"]; custom = res["custom"]
             files = ", ".join(f"_eatrax{f}.rws" for f in res["files"]) or "(originals untouched)"
-            pnach_path = res.get("pnach_path")
-            if pnach_path:
-                pnach_line = f"pnach written to your PCSX2 cheats folder:\n  {pnach_path}"
+            if res.get("pnach_path"):
+                pnach_line = ("Both pnach written to your PCSX2 cheats folder:\n"
+                              "  • BEBF8793_eatrax_expansion.pnach   (your custom tracks)\n"
+                              "  • BEBF8793_hostfs.pnach             (HostFS loader)")
             else:
-                # No cheats folder set/found — save it into the HostFS folder so it's never lost.
-                fb = os.path.join(self.hostfs_dir, "BEBF8793_eatrax_expansion.pnach")
-                open(fb, "w").write(res["pnach"])
-                pnach_line = ("no PCSX2 cheats folder set — pnach saved to:\n  " + fb +
-                              "\n  ➜ copy it into your PCSX2 'cheats' folder.")
+                # No cheats folder set/found — save BOTH into the HostFS folder so nothing is lost.
+                f1 = os.path.join(self.hostfs_dir, "BEBF8793_eatrax_expansion.pnach"); open(f1, "w").write(res["pnach"])
+                f2 = os.path.join(self.hostfs_dir, "BEBF8793_hostfs.pnach"); open(f2, "w").write(ee.HOSTFS_PNACH)
+                pnach_line = ("no PCSX2 cheats folder set — both pnach saved into the HostFS folder:\n"
+                              f"  {f1}\n  {f2}\n  ➜ copy them into your PCSX2 'cheats' folder.")
             msg = (f"Soundtrack built: {n} track(s) total — {custom} custom, {n-custom} original.\n"
                    f"Rebuilt: {files}\nNames + GLOBALUS rebuilt.\n\n"
                    f"{pnach_line}\n\n"
-                   "In PCSX2 enable cheats: [HostFS] + [EATRAX expansion] (the [ELF Code Cave] is no "
-                   "longer needed), then boot the ISO from the HostFS (ciopfs) mount.")
+                   "In PCSX2 just enable [HostFS] + [EATRAX expansion] (both written by the tool — no "
+                   "[ELF Code Cave] needed), then boot the ISO from the HostFS (ciopfs) mount.")
             self.log_line.emit("✓ Done.")
             self.finished.emit(True, msg)
         except Exception as e:

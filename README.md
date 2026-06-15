@@ -179,7 +179,7 @@ Already done: ✅ full-length songs (portable ISO), ✅ HostFS integration for +
 
 ## 🙏 Credits & Acknowledgments
 
-- **[Nahelam](https://github.com/Nahelam)** — [PS2-Game-Mods](https://github.com/Nahelam/PS2-Game-Mods) for Burnout 3 modding research, HostFS patches, and community support
+- **[Nahelam](https://github.com/Nahelam)** — [PS2-Game-Mods](https://github.com/Nahelam/PS2-Game-Mods) / [PCSX2-HostFS-Patches](https://github.com/Nahelam/PCSX2-HostFS-Patches) for Burnout 3 modding research, HostFS patches, and community support. The `[HostFS]` cheat written by the HostFS build is Nahelam's patch (the `gtfs*.irx` modules it uses are Criterion's own, already present in every retail ISO — nothing copyrighted is redistributed here).
 - **burninrubber0** — RWS format documentation, song metadata research, and invaluable guidance from the [Burnout Wiki](https://burnout.wiki)
 - **[AcuteSyntax](https://gist.github.com/AcuteSyntax/536a2d62ab1b3fde5c14f70d268b14c0)** — Burnout modding format documentation
 - **vgmstream** — For confirming the audio codec and sample rate
