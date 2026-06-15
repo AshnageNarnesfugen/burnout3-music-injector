@@ -91,7 +91,7 @@ All three live in the single **`🎶 SOUNDTRACK`** tab (pre-loads the 44 origina
 | Build button | Tracks | Length | Names | Cheats? | Runs on |
 |------|--------|--------|-------|---------|---------|
 | 💿 **BUILD PORTABLE ISO** | 44 (replace) | **full** | **unlimited (romanized)** | none | PCSX2 / Android / PS2 |
-| 🛠 **BUILD HostFS** | **N (add beyond 44)** | **full** | **unlimited (romanized)** | `[HostFS]` + `[EATRAX expansion]` (auto-written) | PCSX2 (PC) |
+| 🛠 **BUILD HostFS** | **N (add beyond 44)** | **full** | **unlimited (romanized)** | `[HostFS]` + `[ELF Code Cave]` + `[EATRAX expansion]` | PCSX2 (PC) |
 
 > **Why two builders?** Burnout 3 reads its loose disc files by **fixed LBA**, so a normal ISO rebuild black-screens. The portable builder works around this surgically (relocate only the path-opened EATRAX/GLOBALUS files to the disc end). Adding *new* files beyond 44 to the ISO isn't loadable by the game's CD path (it works via HostFS, which bypasses the disc filesystem) — so +tracks is HostFS-only for now. See [`BURNOUT3_EATRAX_HANDOFF.md`](BURNOUT3_EATRAX_HANDOFF.md) for the full reverse-engineering write-up.
 

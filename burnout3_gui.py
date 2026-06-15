@@ -1344,8 +1344,8 @@ class ExpansionWorker(QObject):
             msg = (f"Soundtrack built: {n} track(s) total — {custom} custom, {n-custom} original.\n"
                    f"Rebuilt: {files}\nNames + GLOBALUS rebuilt.\n\n"
                    f"{pnach_line}\n\n"
-                   "In PCSX2 enable [HostFS] + [EATRAX expansion] (both written by the tool — [ELF Code "
-                   "Cave] is NOT needed; disable it).\n\n"
+                   "In PCSX2 enable [HostFS] + [ELF Code Cave] + [EATRAX expansion] ([HostFS] + the EATRAX "
+                   "pnach are written by the tool; [ELF Code Cave] is Nahelam's).\n\n"
                    "⚠ BOOT the game ISO that sits INSIDE your ciopfs mount folder (so PCSX2's host: points "
                    "at the disc files) — e.g. <mount>/burnout3.iso. Booting the ORIGINAL loose ISO = black "
                    "screen (host: would point to a folder with no game files).")
@@ -1929,7 +1929,7 @@ class MainWindow(QMainWindow):
                       "ones below; untouched slots keep the original track. Names auto-romanize from any "
                       "language. Then pick a build:\n"
                       "  💿 PORTABLE ISO — 44 full-length + unlimited names, self-contained, no cheats (PCSX2/Android/PS2).\n"
-                      "  🛠 HostFS — adds N tracks beyond 44 (full-length); needs cheats [HostFS]+[EATRAX expansion] (auto-written).")
+                      "  🛠 HostFS — adds N tracks beyond 44 (full-length); needs cheats [HostFS]+[ELF Code Cave]+[EATRAX expansion].")
         note.setWordWrap(True)
         note.setStyleSheet("color:#888;font-size:11px;padding:10px;background:rgba(255,140,0,0.05);border:1px solid #222;border-radius:8px")
         lay.addWidget(note)
