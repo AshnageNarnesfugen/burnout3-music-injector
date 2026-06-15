@@ -317,16 +317,21 @@ def build_soundtrack(hostfs_dir, slots, cheats_dir=None, log=print, progress=Non
     max_file = (N - 1) // TRACKS_PER_FILE
     tmp = tempfile.mkdtemp(prefix="eatrax_")
     try:
+        # Always rebuild every needed file FROM PRISTINE — so re-running with different songs starts
+        # clean (slots you no longer customize go back to the original; no stale audio lingers).
         for f in range(max_file + 1):
             songs = files.get(f, {})
-            if f < 2 and not songs:
-                continue                                  # file 0/1 untouched -> leave original on disk
             if progress: progress(f"Building _eatrax{f}.rws...")
             log(f"building _eatrax{f}.rws ({len(songs)} custom)...")
             base = _pristine(os.path.join(tracks_dir, f"_eatrax{f}.rws"), log) if f < 2 \
                    else _pristine(os.path.join(tracks_dir, "_eatrax1.rws"), log)   # template for new files
             out = _build_eatrax_file(b3, base, songs, tmp, log)
             open(os.path.join(tracks_dir, f"_eatrax{f}.rws"), "wb").write(out)
+        # drop _eatraxN files left over from a previous, larger build (so old extra tracks don't linger)
+        for f in range(max_file + 1, 10):
+            stale = os.path.join(tracks_dir, f"_eatrax{f}.rws")
+            if os.path.exists(stale):
+                os.remove(stale); log(f"removed stale _eatrax{f}.rws")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
