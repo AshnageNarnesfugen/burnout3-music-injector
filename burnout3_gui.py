@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QFileDialog, QProgressBar, QTextEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
     QTabWidget, QFrame, QGroupBox, QAbstractItemView, QTreeWidget,
-    QTreeWidgetItem, QSplitter
+    QTreeWidgetItem, QSplitter, QCheckBox
 )
 from PySide6.QtCore import Qt, Signal, QObject, QThread
 from PySide6.QtGui import QColor, QPalette
@@ -1344,8 +1344,11 @@ class ExpansionWorker(QObject):
             msg = (f"Soundtrack built: {n} track(s) total — {custom} custom, {n-custom} original.\n"
                    f"Rebuilt: {files}\nNames + GLOBALUS rebuilt.\n\n"
                    f"{pnach_line}\n\n"
-                   "In PCSX2 just enable [HostFS] + [EATRAX expansion] (both written by the tool — no "
-                   "[ELF Code Cave] needed), then boot the ISO from the HostFS (ciopfs) mount.")
+                   "In PCSX2 enable [HostFS] + [EATRAX expansion] (both written by the tool — [ELF Code "
+                   "Cave] is NOT needed; disable it).\n\n"
+                   "⚠ BOOT the game ISO that sits INSIDE your ciopfs mount folder (so PCSX2's host: points "
+                   "at the disc files) — e.g. <mount>/burnout3.iso. Booting the ORIGINAL loose ISO = black "
+                   "screen (host: would point to a folder with no game files).")
             self.log_line.emit("✓ Done.")
             self.finished.emit(True, msg)
         except Exception as e:
@@ -1952,6 +1955,10 @@ class MainWindow(QMainWindow):
         ba = QPushButton("➕ Add songs"); ba.clicked.connect(self._st_add_songs); tb.addWidget(ba)
         br = QPushButton("➖ Remove / reset selected"); br.setObjectName("dangerBtn"); br.clicked.connect(self._st_remove_selected); tb.addWidget(br)
         bz = QPushButton("↺ Reset all"); bz.setObjectName("dangerBtn"); bz.clicked.connect(self._st_reset_all); tb.addWidget(bz)
+        self.chk_replace = QCheckBox("Replace originals"); self.chk_replace.setChecked(True)
+        self.chk_replace.setToolTip("ON: your songs fill the 44 slots from #1 (EA Trax originals get replaced).\n"
+                                    "OFF: keep all 44 originals and add your songs as EXTRA tracks (45, 46, …).")
+        tb.addWidget(self.chk_replace)
         tb.addStretch()
         self.lbl_expcount = QLabel(""); self.lbl_expcount.setStyleSheet("color:#ff8c00;font-weight:bold"); tb.addWidget(self.lbl_expcount)
         lay.addLayout(tb)
@@ -2102,10 +2109,11 @@ class MainWindow(QMainWindow):
         return None
 
     def _st_add_songs_paths(self, files):
-        # Replace the default tracks first (fill from slot 1), then extend beyond 44 — so your songs
-        # become the soundtrack instead of piling up after the originals.
+        # "Replace originals" ON  -> fill the 44 default slots from #1, then extend past 44.
+        # "Replace originals" OFF -> keep all 44 originals, add everything as extra tracks (45+).
+        replace = getattr(self, "chk_replace", None) is None or self.chk_replace.isChecked()
         for fp in files:
-            slot = self._st_first_default_slot()
+            slot = self._st_first_default_slot() if replace else None
             if slot is not None:
                 self._st_set_custom(slot, fp)
             else:
