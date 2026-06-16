@@ -19,10 +19,21 @@ HOOK_VAS = [0x003FBCD0, 0x003FC38C]                  # the digit block in both P
 HOOK = [0x8E0200D8, 0x24010016, 0x0041001B, 0x00001012, 0xAE0200E0,
         0x00024040, 0x3C01004D, 0x2421EA78, 0x00284021]   # digit = track/22 ; &digit[track/22]
 DIGITS_VA = 0x004CEA78
-DIGITS = b''.join(bytes([0x30 + d, 0]) for d in range(10))  # "0".."9" null-term, stride 2 (digits 0-9 => up to 10 files)
 COUNT_VA = 0x004A5A24
 BASEPTR_VA = 0x004A5A6C
 META_VA = 0x004A5600
+# EA-TRAX track capacity is hard-coded to 66 (0x42) in the audio-manager constructor: two
+# `addiu rt,zero,66` instructions stash it into the manager struct (+0x6C). That field is the
+# wall — it is NOT a buffer size, it's used as a bound-check (`track_index < cap`, 0x3FB7EC) and
+# as a wrap-around modulo (`(track+i+1) % cap`, 0x3FBE40). The metadata array is heap (relocated to
+# the cave) and indexed by index*0x18, so raising the cap raises the real limit. The data word at
+# COUNT_VA (also 66 originally) is the live count we already patch; the constructor ignores it and
+# uses the hard-coded constant, so a count>66 with an un-raised cap overflows at init -> boot hang.
+# RE: research/ghidra/DumpLimit + /tmp/find_limit.py. File routing (digit=idx/22, files 0-9) caps at 220.
+CAP_VAS = (0x003FC094, 0x003FCD98)   # `addiu v0,zero,66` / `addiu v1,zero,66`
+CAP_INSN = (0x24020000, 0x24030000)  # same, imm cleared -> OR with new cap
+GAME_CAP = 66
+MAX_TRACKS = 220
 CAVE = 0x0016B4F0                                    # Nahelam code cave (legacy; needed [ELF Code Cave])
 META_NEW_VA = 0x00485894                             # free ELF zero-run (~6996B = 291 entries) -> NO cheat
 
@@ -195,6 +206,23 @@ def _rebuild_globalus(path, new_strings, log):
     log(f"  globalus.bin rebuilt: +{len(new_strings)} strings (ids {count}..{total-1}), {len(out)} bytes")
     return count
 
+def globalus_overwrite(g_bytes, overrides, log=print):
+    """Return new globalus bytes that REPLACE the text of specific existing string ids (overrides =
+    {string_id: text}), keeping the count unchanged. Appends each new string at the end and repoints
+    only that id's table entry. Lets the portable ISO rename tracks WITHOUT editing the ELF metadata,
+    so the game CRC stays BEBF8793 and PCSX2's per-game graphics fixes still apply."""
+    g = bytearray(g_bytes)
+    count = struct.unpack_from("<I", g, 8)[0]
+    tbl = struct.unpack_from("<I", g, 0xC)[0]
+    add = bytearray(); base = len(g)
+    for i, t in overrides.items():
+        if not (0 <= i < count):
+            continue
+        struct.pack_into("<I", g, tbl + i * 4, base + len(add))   # repoint id -> appended string
+        add += t.encode("utf-16-le") + b"\x00\x00"
+    log(f"  globalus: overwrote {len(overrides)} string id(s) in place (count {count} unchanged, ELF untouched)")
+    return bytes(g) + bytes(add)
+
 # ---- pnach ----
 def _gen_pnach(entries, count, log):
     # HostFS uses Nahelam's code cave (0x16B4F0, ~205 KB, validated) for the metadata array — it has
@@ -208,11 +236,24 @@ def _gen_pnach(entries, count, log):
     for base in HOOK_VAS:
         L.append(f"// digit hook @0x{base:08X}")
         L += [w(base + i * 4, x) for i, x in enumerate(HOOK)]
-    L.append("// digit strings 0-9 @0x4CEA78")
-    for k in range(0, len(DIGITS), 4):
-        L.append(w(DIGITS_VA + k, struct.unpack_from("<I", DIGITS, k)[0]))
+    # Digit chars live at DIGITS_VA (0x4CEA78), stride 2. CRITICAL: the ".rws" filename-extension string
+    # sits right after, at 0x4CEA88 (DIGITS_VA+16). We must write ONLY the digits we need (0..num_files-1)
+    # and never reach +16, or the audio filename loses its ".rws" and the game can't open the track -> hang.
+    num_files = (count - 1) // TRACKS_PER_FILE + 1          # _eatrax0.._eatrax{num_files-1}
+    n_words = (num_files + 1) // 2                          # 2 digit chars per 32-bit word
+    if n_words > 4:                                         # word 4 starts at +16 == the ".rws" string
+        raise RuntimeError(f"{count} tracks needs {num_files} _eatrax files, but the digit table only fits "
+                           f"8 files (176 tracks) before the .rws string at 0x{DIGITS_VA+16:08X}")
+    digs = b''.join(bytes([0x30 + d, 0]) for d in range(n_words * 2))   # '0','1',... packed, stride 2
+    L.append(f"// digit chars 0..{num_files-1} @0x{DIGITS_VA:08X} (must stop before .rws @0x{DIGITS_VA+16:08X})")
+    for k in range(0, len(digs), 4):
+        L.append(w(DIGITS_VA + k, struct.unpack_from("<I", digs, k)[0]))
     L.append("// master count + metadata base pointer -> Nahelam code cave (needs [ELF Code Cave])")
     L += [w(COUNT_VA, count), w(BASEPTR_VA, CAVE)]
+    if count > GAME_CAP:
+        L.append(f"// EXPERIMENTAL: raise hard-coded track capacity {GAME_CAP} -> {count} "
+                 "(bound-check + wrap modulo; >66 unverified, needs a boot test)")
+        L += [w(va, insn | (count & 0xFFFF)) for va, insn in zip(CAP_VAS, CAP_INSN)]
     L.append(f"// metadata array ({len(entries)} entries) @0x{CAVE:X}")
     flat = [v for e in entries for v in e]
     L += [w(CAVE + k * 4, v) for k, v in enumerate(flat)]
