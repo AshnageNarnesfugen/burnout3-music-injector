@@ -1386,6 +1386,95 @@ class PortableIsoWorker(QObject):
             self.finished.emit(False, f"{e}\n{traceback.format_exc()[-600:]}")
 
 
+class ExportWorker(QObject):
+    """Bundle the WHOLE HostFS setup into a portable, self-contained package for another PCSX2 / device:
+    the game folder (minus the .orig pristine backups) + the 3 cheats + a per-platform install README."""
+    progress = Signal(str)
+    finished = Signal(bool, str)
+    CHEATS = ("BEBF8793_eatrax_expansion.pnach", "BEBF8793_hostfs.pnach", "BEBF8793_elf_code_cave.pnach")
+
+    def __init__(self, hostfs_dir, cheats_dir, dest_root):
+        super().__init__()
+        self.hostfs_dir = hostfs_dir; self.cheats_dir = cheats_dir; self.dest_root = dest_root
+
+    def run(self):
+        try:
+            dest = os.path.join(self.dest_root, "Burnout3_CustomSoundtrack")
+            game = os.path.join(dest, "game"); cheats_out = os.path.join(dest, "cheats")
+            os.makedirs(game, exist_ok=True); os.makedirs(cheats_out, exist_ok=True)
+            # 1) game files — skip the pristine .orig backups (build-only, ~300 MB) and the boot.iso symlink
+            #    (we copy the real burnout3.iso instead, so the package is self-contained).
+            srcs = []
+            for root, _dirs, fs in os.walk(self.hostfs_dir):
+                for f in fs:
+                    if f.endswith(".orig"): continue
+                    p = os.path.join(root, f)
+                    if os.path.islink(p) and os.path.realpath(p) == os.path.realpath(
+                            os.path.join(self.hostfs_dir, "burnout3.iso")): continue
+                    srcs.append(p)
+            total = len(srcs)
+            for i, src in enumerate(srcs, 1):
+                dst = os.path.join(game, os.path.relpath(src, self.hostfs_dir))
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)                       # follows file symlinks -> real bytes
+                if i % 25 == 0 or i == total:
+                    self.progress.emit(f"Copying game files… {i}/{total}")
+            # 2) cheats
+            copied = []
+            for c in self.CHEATS:
+                p = os.path.join(self.cheats_dir, c)
+                if os.path.isfile(p):
+                    shutil.copy2(p, os.path.join(cheats_out, c)); copied.append(c)
+            # 3) README
+            open(os.path.join(dest, "README.txt"), "w").write(self._readme(copied))
+            self.progress.emit("✓ Done.")
+            missing = [c for c in self.CHEATS if c not in copied]
+            warn = ("\n\n⚠ Couldn't find: " + ", ".join(missing) + " — enable that cheat in PCSX2 once, "
+                    "or copy it into cheats/ by hand.") if missing else ""
+            self.finished.emit(True, f"Package exported to:\n{dest}\n\n"
+                               f"• game/   ({total} files, the full game + your custom tracks)\n"
+                               f"• cheats/ ({len(copied)}/3 pnach)\n• README.txt (PC + Android setup){warn}")
+        except Exception as e:
+            import traceback
+            self.finished.emit(False, f"{e}\n{traceback.format_exc()[-500:]}")
+
+    def _readme(self, copied):
+        return (
+"BURNOUT 3: TAKEDOWN - Custom Soundtrack (HostFS package)\n"
+"========================================================\n"
+"Self-contained. Game CRC BEBF8793 (NTSC-U, SLUS-21050).\n\n"
+"CONTENTS\n"
+"  game/    the Burnout 3 files HostFS reads - your custom soundtrack is baked into\n"
+"           tracks/_eatrax*.rws + data/globalus.bin. Boot the ISO that sits in here.\n"
+"  cheats/  the 3 PCSX2 cheats this needs: " + ", ".join(copied) + "\n\n"
+"================  PC  (Windows / macOS / Linux)  ================\n"
+"1) Copy the 3 files from cheats/ into PCSX2's cheats folder:\n"
+"     Windows : Documents\\PCSX2\\cheats\n"
+"     macOS   : ~/Library/Application Support/PCSX2/cheats\n"
+"     Linux   : ~/.config/PCSX2/cheats\n"
+"     Linux (Flatpak): ~/.var/app/net.pcsx2.PCSX2/config/PCSX2/cheats\n"
+"2) PCSX2 -> Settings: enable cheats. Then in the game's cheat list TICK ALL THREE:\n"
+"     [HostFS]   [ELF Code Cave]   [EATRAX expansion]\n"
+"3) Boot the ISO INSIDE this package:  game/burnout3.iso\n"
+"   HostFS makes the game read the loose files next to that ISO = your custom tracks.\n"
+"   - Windows / macOS: works as-is (filesystem is case-insensitive).\n"
+"   - Linux: the files are lowercase, so mount game/ case-insensitively first:\n"
+"       ciopfs \"<path>/game\" \"<mountpoint>\"   then boot  <mountpoint>/burnout3.iso\n"
+"     (ciopfs = a small FUSE tool; without it host: won't find the upper-case names.)\n\n"
+"================  Android (AetherSX2 / NetherSX2)  ================\n"
+"  WARNING: many builds of these forks do NOT support HostFS (the host: redirect).\n"
+"  If yours lacks it, the +44 soundtrack will NOT load. Try it: put the cheats in the\n"
+"  app's cheats folder, make game/ reachable, enable the 3 cheats, boot burnout3.iso.\n"
+"  If it hangs/black-screens at boot, your build has no HostFS - there's no workaround\n"
+"  beyond 44 tracks on that device (use the 44-track Portable ISO instead).\n\n"
+"NOTES\n"
+"  - All three cheats must be ON together.\n"
+"  - Boot ONLY game/burnout3.iso - host: points at wherever the booted ISO lives, so a\n"
+"    different/original ISO = black screen.\n"
+"  - elf_code_cave.pnach is the game's own relocated code - fine for your own devices,\n"
+"    don't post it publicly.\n")
+
+
 class ExtractWorker(QObject):
     """Extract a disc image to a HostFS folder (xorriso), lowercase names for ciopfs, drop a boot-ISO
     symlink, and mount ciopfs if available. Runs once per folder; HostFS-only (Linux)."""
@@ -1985,6 +2074,10 @@ class MainWindow(QMainWindow):
         self.btn_build_exp.setMinimumHeight(38)
         self.btn_build_exp.clicked.connect(self._st_build)
         lay.addWidget(self.btn_build_exp)
+        self.btn_export = QPushButton("📤  EXPORT package   —   copy this whole HostFS setup + cheats to another PCSX2 / device")
+        self.btn_export.setMinimumHeight(34)
+        self.btn_export.clicked.connect(self._st_export)
+        lay.addWidget(self.btn_export)
         self.exp_log = QTextEdit(); self.exp_log.setReadOnly(True); self.exp_log.setMaximumHeight(120); lay.addWidget(self.exp_log)
         self._st_reset_all()
         return w
@@ -2142,17 +2235,34 @@ class MainWindow(QMainWindow):
         n = self.exp_table.rowCount()
         custom = sum(1 for r in range(n)
                      if self.exp_table.item(r, 1) and self.exp_table.item(r, 1).data(Qt.ItemDataRole.UserRole))
-        self.lbl_expcount.setText(f"{n} tracks · {custom} custom · {n - custom} original")
-        # Portable ISO handles the 44 slots; going beyond 44 needs HostFS. Enable only the applicable one.
+        msg = f"{n} tracks · {custom} custom · {n - custom} original"
+        # Hard ceiling = 176 (8 _eatrax files x 22): beyond it the digit table would clobber the ".rws"
+        # string at 0x4CEA88. 45..66 is proven; 67..176 also routes fine but needs the audio-cap raise
+        # (RE-derived CAP_VAS patches) — works but flagged experimental until you boot-test your count.
+        HARD_MAX = 176
+        over_max = n > HARD_MAX
+        if over_max:
+            msg += f"  ⛔ {n} > {HARD_MAX} — past the file-routing limit (remove {n-HARD_MAX} to build)"
+            self.lbl_expcount.setStyleSheet("color:#ff4444;font-weight:bold")
+        elif n > 66:
+            msg += f"  ⚠ {n} > 66 — experimental (raises the audio cap; boot-test it)"
+            self.lbl_expcount.setStyleSheet("color:#ffcc00;font-weight:bold")
+        else:
+            self.lbl_expcount.setStyleSheet("color:#ff8c00;font-weight:bold")
+        self.lbl_expcount.setText(msg)
+        # Portable ISO handles the 44 slots; 45..176 needs HostFS. Enable only the applicable one.
         expansion = n > 44
         if hasattr(self, "btn_build_iso"):
             self.btn_build_iso.setEnabled(not expansion)
             self.btn_build_iso.setToolTip("" if not expansion
                 else "Disabled: you have more than 44 tracks → use BUILD HostFS (a portable ISO supports 44).")
         if hasattr(self, "btn_build_exp"):
-            self.btn_build_exp.setEnabled(expansion)
-            self.btn_build_exp.setToolTip("" if expansion
-                else "Disabled: only needed for +tracks beyond 44. Add tracks past 44 to enable it.")
+            self.btn_build_exp.setEnabled(expansion and not over_max)
+            self.btn_build_exp.setToolTip(
+                f"Disabled: {n} tracks exceeds the file-routing limit of {HARD_MAX} (8 _eatrax files x 22). "
+                "Remove some tracks." if over_max else
+                "" if expansion else
+                "Disabled: only needed for +tracks beyond 44. Add tracks past 44 to enable it.")
 
     def _st_build(self):
         n = self.exp_table.rowCount()
@@ -2200,6 +2310,42 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.critical(self, "Error", msg)
 
+    def _st_export(self):
+        if not self._hostfs_ready(self.exp_folder):
+            QMessageBox.critical(self, "", "HostFS folder isn't ready — build your soundtrack first."); return
+        if self.worker_thread and self.worker_thread.isRunning():
+            QMessageBox.warning(self, "", "Already processing."); return
+        cheats = self.cheats_dir if (self.cheats_dir and os.path.isdir(self.cheats_dir)) else None
+        if not cheats or not os.path.isfile(os.path.join(cheats, "BEBF8793_eatrax_expansion.pnach")):
+            QMessageBox.warning(self, "", "Build the HostFS soundtrack first so the cheats exist "
+                                "(and set your PCSX2 cheats folder)."); return
+        dest = QFileDialog.getExistingDirectory(self, "Export to… (pick a folder / USB drive)",
+                                                os.path.expanduser("~"))
+        if not dest: return
+        if QMessageBox.question(self, "Export package",
+                "This copies the WHOLE HostFS folder (full game + your custom tracks, several GB) plus the "
+                "3 cheats and a setup README into a self-contained package.\n\nContinue?"
+                ) != QMessageBox.StandardButton.Yes:
+            return
+        self.btn_export.setEnabled(False); self.btn_export.setText("⏳ EXPORTING…"); self.exp_log.clear()
+        self.worker_thread = QThread()
+        self.export_worker = ExportWorker(self.exp_folder, cheats, dest)
+        self.export_worker.moveToThread(self.worker_thread)
+        self.worker_thread.started.connect(self.export_worker.run)
+        self.export_worker.progress.connect(self._st_log_line)
+        self.export_worker.finished.connect(self._st_export_done)
+        self.export_worker.finished.connect(self.worker_thread.quit)
+        self.export_worker.finished.connect(lambda: setattr(self, "_prev_export_worker", self.export_worker))
+        self.worker_thread.start()
+
+    def _st_export_done(self, ok, msg):
+        self.btn_export.setEnabled(True)
+        self.btn_export.setText("📤  EXPORT package   —   copy this whole HostFS setup + cheats to another PCSX2 / device")
+        if ok:
+            QMessageBox.information(self, "Package exported!", msg)
+        else:
+            QMessageBox.critical(self, "Error", msg)
+
     def _st_build_portable(self):
         n = self.exp_table.rowCount()
         if self.worker_thread and self.worker_thread.isRunning():
@@ -2224,10 +2370,14 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Portable ISO",
                 f"A portable ISO supports the 44 original slots only (for now).\nThe {beyond} track(s) "
                 "beyond slot 44 will be skipped — use BUILD HostFS for those.")
-        clean, _ = QFileDialog.getOpenFileName(self, "Select the CLEAN Burnout 3 ISO (source)", "", "ISO (*.iso)")
-        if not clean: return
-        out, _ = QFileDialog.getSaveFileName(self, "Save portable ISO as...",
-                                             os.path.expanduser("~/Burnout3_custom.iso"), "ISO (*.iso)")
+        # Reuse the ISO already loaded in the ISO tab; only ask if none is loaded.
+        clean = self.iso_path if (self.iso_path and os.path.isfile(self.iso_path)) else None
+        if not clean:
+            clean, _ = QFileDialog.getOpenFileName(self, "Select the CLEAN Burnout 3 ISO (source)", "", "ISO (*.iso)")
+            if not clean: return
+        default_out = (os.path.splitext(self.iso_path)[0] + "_custom.iso") if self.iso_path \
+            else os.path.expanduser("~/Burnout3_custom.iso")
+        out, _ = QFileDialog.getSaveFileName(self, "Save portable ISO as...", default_out, "ISO (*.iso)")
         if not out: return
         if os.path.abspath(out) == os.path.abspath(clean):
             QMessageBox.critical(self, "", "Output must be different from the source ISO."); return
