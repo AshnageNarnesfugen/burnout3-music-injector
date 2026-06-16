@@ -1360,9 +1360,9 @@ class PortableIsoWorker(QObject):
     log_line = Signal(str)
     finished = Signal(bool, str)
 
-    def __init__(self, clean_iso, out_iso, slots):
+    def __init__(self, clean_iso, out_iso, slots, cave_pnach=None):
         super().__init__()
-        self.clean_iso = clean_iso; self.out_iso = out_iso; self.slots = slots
+        self.clean_iso = clean_iso; self.out_iso = out_iso; self.slots = slots; self.cave_pnach = cave_pnach
 
     def run(self):
         try:
@@ -1372,13 +1372,15 @@ class PortableIsoWorker(QObject):
                 "build_portable_iso", os.path.join(here, "research", "build_portable_iso.py"))
             bp = importlib.util.module_from_spec(spec); spec.loader.exec_module(bp)
             res = bp.build_portable_iso(self.clean_iso, self.out_iso, self.slots,
-                                        log=self.log_line.emit, progress=self.log_line.emit)
+                                        log=self.log_line.emit, progress=self.log_line.emit,
+                                        cave_pnach=self.cave_pnach)
             mb = res["size"] // (1024 * 1024)
             files = ", ".join(f"_eatrax{f}.rws" for f in res["files"])
-            msg = (f"Portable ISO built — {res['custom']} full-length custom track(s) ({mb} MB).\n"
-                   f"Rebuilt: {files}\n{self.out_iso}\n\n"
+            msg = (f"Portable ISO built — {res['count']} tracks ({res['custom']} custom, {mb} MB).\n"
+                   f"{self.out_iso}\n\n"
                    "Self-contained: NO cheats, NO HostFS. Boots in PCSX2, Android "
-                   "(AetherSX2/NetherSX2) and real PS2 — just load this ISO.")
+                   "(AetherSX2/NetherSX2) and real PS2 — just load this ISO.\n"
+                   "(If you have the game's cheats enabled in PCSX2, turn them OFF for this ISO — it's baked in.)")
             self.log_line.emit("✓ Done.")
             self.finished.emit(True, msg)
         except Exception as e:
@@ -2261,18 +2263,16 @@ class MainWindow(QMainWindow):
         if over_max:
             msg += f"  ⛔ {n} > {HARD_MAX} — past the file-routing limit (remove {n-HARD_MAX} to build)"
             self.lbl_expcount.setStyleSheet("color:#ff4444;font-weight:bold")
-        elif n > 66:
-            msg += f"  ⚠ {n} > 66 — experimental (raises the audio cap; boot-test it)"
-            self.lbl_expcount.setStyleSheet("color:#ffcc00;font-weight:bold")
         else:
             self.lbl_expcount.setStyleSheet("color:#ff8c00;font-weight:bold")
         self.lbl_expcount.setText(msg)
-        # Portable ISO handles the 44 slots; 45..176 needs HostFS. Enable only the applicable one.
+        # The portable ISO now handles the FULL range (≤176): ≤44 cheatless, 45..176 bakes the expansion
+        # into the ELF (needs the [ELF Code Cave] pnach). HostFS stays as the alternative for 45..176.
         expansion = n > 44
         if hasattr(self, "btn_build_iso"):
-            self.btn_build_iso.setEnabled(not expansion)
-            self.btn_build_iso.setToolTip("" if not expansion
-                else "Disabled: you have more than 44 tracks → use BUILD HostFS (a portable ISO supports 44).")
+            self.btn_build_iso.setEnabled(not over_max)
+            self.btn_build_iso.setToolTip(
+                f"Disabled: {n} > {HARD_MAX} tracks (8 _eatrax files x 22)." if over_max else "")
         if hasattr(self, "btn_build_exp"):
             self.btn_build_exp.setEnabled(expansion and not over_max)
             self.btn_build_exp.setToolTip(
@@ -2369,12 +2369,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "", "Already processing."); return
         if not self.deps.get("ffmpeg"):
             QMessageBox.critical(self, "", "ffmpeg not found."); return
-        slots = []; custom = 0; beyond = 0
+        slots = []; custom = 0
         for r in range(n):
             si = self.exp_table.item(r, 1); fp = si.data(Qt.ItemDataRole.UserRole) if si else None
-            if r >= 44:
-                if fp: beyond += 1
-                continue
             if fp and os.path.isfile(fp):
                 def cell(c): it = self.exp_table.item(r, c); return (it.text().strip() if it else "")
                 slots.append({"song": fp, "title": cell(2) or os.path.splitext(os.path.basename(fp))[0],
@@ -2382,11 +2379,29 @@ class MainWindow(QMainWindow):
             else:
                 slots.append(None)
         if custom == 0:
-            QMessageBox.warning(self, "", "Assign at least one song to one of the 44 slots."); return
-        if beyond > 0:
-            QMessageBox.information(self, "Portable ISO",
-                f"A portable ISO supports the 44 original slots only (for now).\nThe {beyond} track(s) "
-                "beyond slot 44 will be skipped — use BUILD HostFS for those.")
+            QMessageBox.warning(self, "", "Assign at least one song."); return
+        for g, s in enumerate(slots):                    # the >44 path can't leave gaps past the originals
+            if s is None and g >= 44:
+                QMessageBox.critical(self, "", f"Slot {g+1} is empty — slots beyond 44 must have a song."); return
+        # >44 portable bakes the full expansion into the ELF; it needs the [ELF Code Cave] pnach to free
+        # the region the metadata lives in (the cave is freed by baking its relocation). <=44 needs nothing.
+        cave_pnach = None
+        if self.cheats_dir:
+            cp = os.path.join(self.cheats_dir, "BEBF8793_elf_code_cave.pnach")
+            if os.path.isfile(cp): cave_pnach = cp
+        if len(slots) > 44:
+            if not cave_pnach:
+                QMessageBox.critical(self, "", "A +44 portable ISO needs the [ELF Code Cave] pnach "
+                    "(BEBF8793_elf_code_cave.pnach) in your PCSX2 cheats folder. Set the cheats folder "
+                    "(📂 PCSX2 cheats) so the tool can read it, or build with ≤44 tracks (no cheat needed).")
+                return
+            if QMessageBox.question(self, "Portable ISO (+tracks)",
+                    f"Bake {len(slots)} tracks into a self-contained ISO (no cheats, no HostFS)?\n\n"
+                    "It bakes the digit hook + relocated metadata + the code-cave into the ELF and keeps the "
+                    "game CRC intact (CRC-neutral) so graphics stay correct. Boots in PCSX2 / Android / PS2.\n\n"
+                    "⚠ Turn OFF the game's cheats in PCSX2 when running this ISO (it's all baked in)."
+                    ) != QMessageBox.StandardButton.Yes:
+                return
         # Reuse the ISO already loaded in the ISO tab; only ask if none is loaded.
         clean = self.iso_path if (self.iso_path and os.path.isfile(self.iso_path)) else None
         if not clean:
@@ -2400,7 +2415,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "", "Output must be different from the source ISO."); return
         self.btn_build_iso.setEnabled(False); self.btn_build_iso.setText("⏳  BUILDING ISO..."); self.exp_log.clear()
         self.worker_thread = QThread()
-        self.iso_worker = PortableIsoWorker(clean, out, slots)
+        self.iso_worker = PortableIsoWorker(clean, out, slots, cave_pnach)
         self.iso_worker.moveToThread(self.worker_thread)
         self.worker_thread.started.connect(self.iso_worker.run)
         self.iso_worker.log_line.connect(self._st_log_line)

@@ -66,8 +66,14 @@ def relocate(buf, rec_off, new_data, log=print):
 
 TRACKS_PER_FILE = 22
 META_FO = 0x100 + (0x004A5600 - 0x00100000)   # file offset of the 24-byte metadata array inside SLUS
-META_NEW_VA = 0x00485894   # 6996-byte zero-run in the loaded ELF (~291 entries) -> relocate the array here
-                           # for +tracks WITHOUT Nahelam's code cave (= no [ELF Code Cave] cheat needed)
+META_NEW_VA = 0x00485894   # free ELF zero-run — DON'T use for the metadata: it's the game's runtime data
+                           # (zero at load, clobbered during play). Kept only as a CRC-comp scratch idea.
+CAVE = 0x0016B4F0          # Nahelam code cave; freed by baking the [ELF Code Cave] patches -> metadata lives here
+# The EATRAX construct @0x3FCD20 copies the global baseptr [0x4A5A6C] into obj[0xB4] (the base used for
+# indexing entries). The game RESETS that global from ~28 sites at runtime, reverting any baked value, so we
+# patch the construct itself to force obj[0xB4]=CAVE (instead of reading the reverted global):
+CONSTRUCT_LUI_VA = 0x003FCDC8   # was: lui $v0,0x4A   -> lui $v0,(CAVE>>16)
+CONSTRUCT_ORI_VA = 0x003FCDD0   # was: lw $a1,0x5A6C($v0) -> ori $a1,$v0,(CAVE&0xFFFF)  => obj[0xB4]=CAVE
 
 def append_data(buf, data):
     """Append data at the disc end (sector-aligned), bump PVD volume size, return its LBA."""
@@ -126,12 +132,13 @@ def add_dir_record(buf, dir_path, fname_ver, file_lba, file_size, log=print):
     struct.pack_into("<I", buf, base + 10, newsize); struct.pack_into(">I", buf, base + 14, newsize)
     log(f"  + /{dir_path.strip('/')}/{fname_ver} @LBA{file_lba} ({file_size}B), sorted pos {ins+2}/{len(ordered)}; dir {dsize}->{newsize}")
 
-def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None):
-    """Bake a portable Burnout 3 ISO (no cheats) from up to 44 slots.
+def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None, cave_pnach=None):
+    """Bake a portable Burnout 3 ISO (no cheats, no HostFS) — up to 176 tracks.
 
-    slots[g] = None (keep original game track) or {'song','title','artist','album'} (custom,
-    full-length). Custom AUDIO -> rebuild+relocate the enlarged _EATRAXf.RWS; custom NAMES ->
-    relocate an enlarged GLOBALUS.BIN + repoint that track's metadata in SLUS (in-place).
+    slots[g] = None (keep original game track) or {'song','title','artist','album'} (custom, full-length).
+    <=44: rename in place via globalus only (ELF untouched, CRC preserved).
+    >44 : bake the whole EA-TRAX expansion into the ELF (cave + hook + count + metadata + construct patch)
+          and XOR-compensate so the game CRC stays 0xBEBF8793. Needs cave_pnach (the [ELF Code Cave] pnach).
     Everything else stays byte-identical at its original LBA, so the disc still boots."""
     b3 = _load("burnout3_gui", os.path.join(HERE, "..", "burnout3_gui.py"))
     ee = _load("eatrax_expansion", os.path.join(HERE, "..", "eatrax_expansion.py"))
@@ -192,8 +199,14 @@ def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None):
         relocate(buf, grec, ee.globalus_overwrite(orig_glob, overrides, log), log)
         log(f"  renamed {len(custom)} track(s) via globalus only — ELF untouched, CRC preserved")
     else:
-        # +tracks: must bake hook+count+metadata into the ELF (this DOES change the CRC; PCSX2's per-game
-        # graphics fixes may not apply for the >44 portable). Append new strings, relocate metadata array.
+        # >44, NO cheats: bake the whole EA-TRAX expansion into the ISO's ELF. The metadata must live where
+        # the game won't clobber it, and the construct must be forced to use it (the game resets the baseptr
+        # global at runtime). Recipe (all baked, then CRC-neutralised so PCSX2 keeps the BEBF8793 graphics fixes).
+        if not (cave_pnach and os.path.isfile(cave_pnach)):
+            raise RuntimeError("A +44 portable ISO needs the [ELF Code Cave] pnach "
+                               "(BEBF8793_elf_code_cave.pnach) — it frees the region the metadata lives in. "
+                               "Put it in your PCSX2 cheats folder (or build <=44 for a cheatless ISO).")
+        # NAMES: append romanized strings to globalus
         gtmp = tempfile.mktemp(prefix="glob_", suffix=".bin")
         open(gtmp, "wb").write(orig_glob)
         if os.path.exists(gtmp + ".orig"): os.remove(gtmp + ".orig")
@@ -206,28 +219,49 @@ def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None):
         for p in (gtmp, gtmp + ".orig"):
             if os.path.exists(p): os.remove(p)
         relocate(buf, grec, new_glob, log)
+        # (a) bake the [ELF Code Cave] relocation -> frees 0x16B4F0 for the metadata array
+        import re as _re, array, functools, operator
+        nc = 0
+        for line in open(cave_pnach):
+            m = _re.match(r'patch=[01],EE,([0-9A-Fa-f]{8}),extended,([0-9A-Fa-f]{8})', line)
+            if m:
+                struct.pack_into("<I", buf, eoff + ee._fo(int(m.group(1), 16) & 0x0FFFFFFF), int(m.group(2), 16)); nc += 1
+        log(f"  baked {nc} [ELF Code Cave] patches (frees 0x{CAVE:X})")
+        # (b) digit hook
         for vbase in ee.HOOK_VAS:
             for k, wv in enumerate(ee.HOOK):
                 struct.pack_into("<I", buf, eoff + ee._fo(vbase + k * 4), wv)
-        # digit chars 0..num_files-1 — must NOT reach DIGITS_VA+16 (the ".rws" string lives there)
+        # (c) digit chars 0..num_files-1 — must NOT reach DIGITS_VA+16 (the ".rws" string lives there)
         num_files = (N - 1) // TRACKS_PER_FILE + 1
         n_words = (num_files + 1) // 2
         if n_words > 4:
             raise RuntimeError(f"{N} tracks needs {num_files} _eatrax files; the digit table caps at 8 files (176)")
         digs = b"".join(bytes([0x30 + d, 0]) for d in range(n_words * 2))
         buf[eoff + ee._fo(ee.DIGITS_VA):eoff + ee._fo(ee.DIGITS_VA) + len(digs)] = digs
+        # (d) count + baseptr + metadata array @ CAVE
         struct.pack_into("<I", buf, eoff + ee._fo(ee.COUNT_VA), N)
-        struct.pack_into("<I", buf, eoff + ee._fo(ee.BASEPTR_VA), META_NEW_VA)
+        struct.pack_into("<I", buf, eoff + ee._fo(ee.BASEPTR_VA), CAVE)
         orig = [list(struct.unpack_from("<IIIIII", buf, eoff + ee._fo(ee.META_VA + i * 24))) for i in range(44)]
         ci = 0
         for g in range(N):
-            ent = eoff + ee._fo(META_NEW_VA) + g * 24
+            ent = eoff + ee._fo(CAVE) + g * 24
             if slots[g] and slots[g].get("song"):
                 b = base_id + ci * 3; ci += 1
                 struct.pack_into("<IIIIII", buf, ent, g, 0, b, b + 1, b + 2, 0x0F)
             else:
                 e = orig[g]; struct.pack_into("<IIIIII", buf, ent, g, 0, e[2], e[3], e[4], 0x0F)
-        log(f"  baked hook + count={N} + relocated metadata array -> VA 0x{META_NEW_VA:X} (no cheats)")
+        # (e) patch the EA-TRAX construct so obj[0xB4]=CAVE (bypass the runtime-reverted baseptr global)
+        struct.pack_into("<I", buf, eoff + ee._fo(CONSTRUCT_LUI_VA), 0x3C020000 | (CAVE >> 16))      # lui $v0,hi
+        struct.pack_into("<I", buf, eoff + ee._fo(CONSTRUCT_ORI_VA), 0x34450000 | (CAVE & 0xFFFF))   # ori $a1,$v0,lo
+        log(f"  baked hook + count={N} + metadata @0x{CAVE:X} + construct patch (obj[0xB4]->CAVE)")
+        # (f) CRC-NEUTRAL: keep the ELF XOR-CRC at 0xBEBF8793 so PCSX2 keeps Burnout 3's graphics fixes.
+        n4 = ssz - (ssz % 4)
+        words = array.array("I"); words.frombytes(bytes(buf[eoff:eoff + n4]))   # host is little-endian (x86)
+        cur = functools.reduce(operator.xor, words, 0) & 0xFFFFFFFF
+        comp = eoff + ee._fo(CAVE) + N * 24 + 0x40                              # free word in the freed cave hole
+        struct.pack_into("<I", buf, comp,
+                         struct.unpack_from("<I", buf, comp)[0] ^ (cur ^ 0xBEBF8793))
+        log(f"  CRC-neutral: ELF XOR-CRC {cur:08X} -> BEBF8793 (graphics fixes survive)")
 
     if progress: progress("Writing ISO...")
     open(out_iso, "wb").write(buf)
@@ -235,7 +269,7 @@ def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None):
     return {"out": out_iso, "custom": len(custom), "files": sorted(files), "size": len(buf), "count": N, "expansion": has_exp}
 
 if __name__ == "__main__":
-    # CLI test: clean.iso out.iso  slot:song.flac[:Title:Artist:Album] ...
+    # CLI test: clean.iso out.iso  slot:song.flac[:Title:Artist:Album] ...   (>44 needs CAVE_PNACH env)
     clean, out = sys.argv[1], sys.argv[2]
     slots = [None] * 44
     for spec in sys.argv[3:]:
@@ -244,5 +278,6 @@ if __name__ == "__main__":
         ti = parts[2] if len(parts) > 2 else os.path.splitext(os.path.basename(song))[0]
         ar = parts[3] if len(parts) > 3 else ""
         al = parts[4] if len(parts) > 4 else ""
+        while len(slots) <= idx: slots.append(None)        # grow for +tracks
         slots[idx] = {"song": song, "title": ti, "artist": ar, "album": al}
-    build_portable_iso(clean, out, slots)
+    build_portable_iso(clean, out, slots, cave_pnach=os.environ.get("CAVE_PNACH"))
