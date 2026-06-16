@@ -21,7 +21,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install PySide6 pyinstaller
+          pip install PySide6 pyinstaller pykakasi
 
       - name: Build Linux executable
         run: |
@@ -29,6 +29,10 @@ jobs:
             --name "burnout3-music-injector" \
             --windowed \
             --add-data "psxadpcm.c:." \
+            --add-data "eatrax_expansion.py:." \
+            --add-data "burnout3_gui.py:." \
+            --add-data "research:research" \
+            --collect-all pykakasi \
             --hidden-import "PySide6.QtCore" \
             --hidden-import "PySide6.QtGui" \
             --hidden-import "PySide6.QtWidgets" \
@@ -58,7 +62,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install PySide6 pyinstaller
+          pip install PySide6 pyinstaller pykakasi
 
       - name: Build Windows executable
         run: |
@@ -66,6 +70,10 @@ jobs:
             --name "burnout3-music-injector" `
             --windowed `
             --add-data "psxadpcm.c;." `
+            --add-data "eatrax_expansion.py;." `
+            --add-data "burnout3_gui.py;." `
+            --add-data "research;research" `
+            --collect-all pykakasi `
             --hidden-import "PySide6.QtCore" `
             --hidden-import "PySide6.QtGui" `
             --hidden-import "PySide6.QtWidgets" `
