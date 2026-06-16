@@ -170,38 +170,52 @@ def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None):
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    # 2) NAMES — enlarged globalus (3 romanized strings per custom track)
-    if progress: progress("Rebuilding names (GLOBALUS)...")
-    grec, glba, gsz = find_record(buf, "/DATA/GLOBALUS.BIN")
-    gtmp = tempfile.mktemp(prefix="glob_", suffix=".bin")
-    open(gtmp, "wb").write(bytes(buf[glba * 2048:glba * 2048 + gsz]))
-    if os.path.exists(gtmp + ".orig"): os.remove(gtmp + ".orig")
-    strings = []
-    for g in custom:
-        s = slots[g]
-        strings += [ee.romanize(s.get("title", "")), ee.romanize(s.get("album", "")), ee.romanize(s.get("artist", ""))]
-    base_id = ee._rebuild_globalus(gtmp, strings, log)
-    new_glob = open(gtmp, "rb").read(); os.remove(gtmp)
-    if os.path.exists(gtmp + ".orig"): os.remove(gtmp + ".orig")
-    relocate(buf, grec, new_glob, log)
-
-    # 3) METADATA in SLUS (in-place; ELF stays at its original LBA)
+    # 2+3) NAMES + METADATA
     srec, slba, ssz = find_record(buf, "/SLUS_210.50")
     eoff = slba * 2048
+    grec, glba, gsz = find_record(buf, "/DATA/GLOBALUS.BIN")
+    orig_glob = bytes(buf[glba * 2048:glba * 2048 + gsz])
+    if progress: progress("Rebuilding names (GLOBALUS)...")
     if not has_exp:
-        # simple: repoint the existing 0..43 entries to the new name ids (no count/hook change, no cheats)
-        for ci, g in enumerate(custom):
-            b = base_id + ci * 3; ent = eoff + META_FO + g * 24
-            struct.pack_into("<I", buf, ent + 8, b); struct.pack_into("<I", buf, ent + 12, b + 1)
-            struct.pack_into("<I", buf, ent + 16, b + 2)
-        log(f"  repointed {len(custom)} name(s) in place")
+        # Rename WITHOUT touching the ELF: overwrite each custom track's ORIGINAL globalus string ids
+        # in place (the unmodified ELF metadata keeps pointing at them). PCSX2 computes the game CRC by
+        # XOR-ing every ELF word, so baking new ids into the ELF would change the CRC and PCSX2 would drop
+        # its Burnout-3 graphics fixes/CRC-hacks (black sky / over-bloom). Keeping the ELF byte-identical
+        # preserves CRC BEBF8793 -> the in-game visuals stay correct.
+        overrides = {}
+        for g in custom:
+            tid, aid, rid = struct.unpack_from("<III", buf, eoff + META_FO + g * 24 + 8)  # title, album, artist ids
+            s = slots[g]
+            overrides[tid] = ee.romanize(s.get("title", ""))
+            overrides[aid] = ee.romanize(s.get("album", ""))
+            overrides[rid] = ee.romanize(s.get("artist", ""))
+        relocate(buf, grec, ee.globalus_overwrite(orig_glob, overrides, log), log)
+        log(f"  renamed {len(custom)} track(s) via globalus only — ELF untouched, CRC preserved")
     else:
-        # expansion: bake digit hook + count + digit strings + relocate the metadata array to the
-        # free ELF zero-run (META_NEW_VA) -> NO code cave, NO cheats
+        # +tracks: must bake hook+count+metadata into the ELF (this DOES change the CRC; PCSX2's per-game
+        # graphics fixes may not apply for the >44 portable). Append new strings, relocate metadata array.
+        gtmp = tempfile.mktemp(prefix="glob_", suffix=".bin")
+        open(gtmp, "wb").write(orig_glob)
+        if os.path.exists(gtmp + ".orig"): os.remove(gtmp + ".orig")
+        strings = []
+        for g in custom:
+            s = slots[g]
+            strings += [ee.romanize(s.get("title", "")), ee.romanize(s.get("album", "")), ee.romanize(s.get("artist", ""))]
+        base_id = ee._rebuild_globalus(gtmp, strings, log)
+        new_glob = open(gtmp, "rb").read()
+        for p in (gtmp, gtmp + ".orig"):
+            if os.path.exists(p): os.remove(p)
+        relocate(buf, grec, new_glob, log)
         for vbase in ee.HOOK_VAS:
             for k, wv in enumerate(ee.HOOK):
                 struct.pack_into("<I", buf, eoff + ee._fo(vbase + k * 4), wv)
-        buf[eoff + ee._fo(ee.DIGITS_VA):eoff + ee._fo(ee.DIGITS_VA) + len(ee.DIGITS)] = ee.DIGITS
+        # digit chars 0..num_files-1 — must NOT reach DIGITS_VA+16 (the ".rws" string lives there)
+        num_files = (N - 1) // TRACKS_PER_FILE + 1
+        n_words = (num_files + 1) // 2
+        if n_words > 4:
+            raise RuntimeError(f"{N} tracks needs {num_files} _eatrax files; the digit table caps at 8 files (176)")
+        digs = b"".join(bytes([0x30 + d, 0]) for d in range(n_words * 2))
+        buf[eoff + ee._fo(ee.DIGITS_VA):eoff + ee._fo(ee.DIGITS_VA) + len(digs)] = digs
         struct.pack_into("<I", buf, eoff + ee._fo(ee.COUNT_VA), N)
         struct.pack_into("<I", buf, eoff + ee._fo(ee.BASEPTR_VA), META_NEW_VA)
         orig = [list(struct.unpack_from("<IIIIII", buf, eoff + ee._fo(ee.META_VA + i * 24))) for i in range(44)]
