@@ -1346,9 +1346,9 @@ class ExpansionWorker(QObject):
                    f"{pnach_line}\n\n"
                    "In PCSX2 enable [HostFS] + [ELF Code Cave] + [EATRAX expansion] ([HostFS] + the EATRAX "
                    "pnach are written by the tool; [ELF Code Cave] is Nahelam's).\n\n"
-                   "⚠ BOOT the game ISO that sits INSIDE your ciopfs mount folder (so PCSX2's host: points "
-                   "at the disc files) — e.g. <mount>/burnout3.iso. Booting the ORIGINAL loose ISO = black "
-                   "screen (host: would point to a folder with no game files).")
+                   "⚠ BOOT the small boot.iso stub that sits INSIDE your ciopfs mount folder (so PCSX2's "
+                   "host: points at the disc files) — e.g. <mount>/boot.iso (the tool builds it on extract). "
+                   "Booting the ORIGINAL loose ISO = black screen (host: would point to a folder with no game files).")
             self.log_line.emit("✓ Done.")
             self.finished.emit(True, msg)
         except Exception as e:
@@ -1455,21 +1455,23 @@ class ExportWorker(QObject):
 "     Linux (Flatpak): ~/.var/app/net.pcsx2.PCSX2/config/PCSX2/cheats\n"
 "2) PCSX2 -> Settings: enable cheats. Then in the game's cheat list TICK ALL THREE:\n"
 "     [HostFS]   [ELF Code Cave]   [EATRAX expansion]\n"
-"3) Boot the ISO INSIDE this package:  game/burnout3.iso\n"
-"   HostFS makes the game read the loose files next to that ISO = your custom tracks.\n"
+"3) Boot the boot stub INSIDE this package:  game/boot.iso\n"
+"   It's a tiny ~4 MB ISO (just the game's ELF). HostFS then reads everything else -\n"
+"   including your custom tracks - from the loose files next to it. Boot THIS, never the\n"
+"   original loose ISO.\n"
 "   - Windows / macOS: works as-is (filesystem is case-insensitive).\n"
 "   - Linux: the files are lowercase, so mount game/ case-insensitively first:\n"
-"       ciopfs \"<path>/game\" \"<mountpoint>\"   then boot  <mountpoint>/burnout3.iso\n"
+"       ciopfs \"<path>/game\" \"<mountpoint>\"   then boot  <mountpoint>/boot.iso\n"
 "     (ciopfs = a small FUSE tool; without it host: won't find the upper-case names.)\n\n"
 "================  Android (AetherSX2 / NetherSX2)  ================\n"
 "  WARNING: many builds of these forks do NOT support HostFS (the host: redirect).\n"
 "  If yours lacks it, the +44 soundtrack will NOT load. Try it: put the cheats in the\n"
-"  app's cheats folder, make game/ reachable, enable the 3 cheats, boot burnout3.iso.\n"
+"  app's cheats folder, make game/ reachable, enable the 3 cheats, boot game/boot.iso.\n"
 "  If it hangs/black-screens at boot, your build has no HostFS - there's no workaround\n"
 "  beyond 44 tracks on that device (use the 44-track Portable ISO instead).\n\n"
 "NOTES\n"
 "  - All three cheats must be ON together.\n"
-"  - Boot ONLY game/burnout3.iso - host: points at wherever the booted ISO lives, so a\n"
+"  - Boot ONLY game/boot.iso - host: points at wherever the booted ISO lives, so a\n"
 "    different/original ISO = black screen.\n"
 "  - elf_code_cave.pnach is the game's own relocated code - fine for your own devices,\n"
 "    don't post it publicly.\n")
@@ -1513,10 +1515,25 @@ class ExtractWorker(QObject):
                     if n != n.lower():
                         try: os.rename(root, os.path.join(p, n.lower()))
                         except OSError: pass
-            boot = os.path.join(self.out_dir, "boot.iso")     # PCSX2 host-root = booted ISO's dir; symlink, no 2.7GB copy
-            try:
-                if not os.path.exists(boot): os.symlink(self.iso_path, boot)
-            except OSError: pass
+            # Build a tiny boot-stub ISO INSIDE the folder. PCSX2 sets host: = the booted ISO's directory,
+            # so the game must boot from HERE to read the custom tracks. The stub holds only the ELF +
+            # SYSTEM.CNF (~4 MB); HostFS serves everything else from this folder. This is what the user
+            # boots — so they never fall into the black-screen trap of booting the original loose ISO
+            # (whose folder has no game files). (Byte-identical to a known-good HostFS boot stub.)
+            boot = os.path.join(self.out_dir, "boot.iso")
+            elf, cnf = os.path.join(self.out_dir, "slus_210.50"), os.path.join(self.out_dir, "system.cnf")
+            if not os.path.exists(boot) and os.path.isfile(elf) and os.path.isfile(cnf):
+                self.progress.emit("Building boot.iso stub (this is what you boot in PCSX2)…")
+                stage = tempfile.mkdtemp(prefix="bootiso_")
+                try:
+                    shutil.copy2(elf, os.path.join(stage, "SLUS_210.50"))
+                    shutil.copy2(cnf, os.path.join(stage, "SYSTEM.CNF"))
+                    subprocess.run(["xorriso", "-as", "mkisofs", "-iso-level", "1", "-V", "BURNOUT3",
+                                    "-o", boot, stage], capture_output=True, text=True)
+                except Exception:
+                    pass
+                finally:
+                    shutil.rmtree(stage, ignore_errors=True)
             # ciopfs case-insensitive view for PCSX2 (Linux); best-effort
             mnt = self.out_dir.rstrip("/") + "_ci"
             ciopfs = shutil.which("ciopfs") or os.path.expanduser("~/.local/bin/ciopfs")
