@@ -1312,51 +1312,10 @@ class InjectionWorker(QObject):
                 shutil.rmtree(tmp, ignore_errors=True)
 
 
-# ─── Expansion Worker (HostFS — add NEW tracks beyond 44) ──────────────────
-class ExpansionWorker(QObject):
-    log_line = Signal(str)
-    finished = Signal(bool, str)
-
-    def __init__(self, hostfs_dir, slots, cheats_dir):
-        super().__init__()
-        self.hostfs_dir = hostfs_dir
-        self.slots = slots          # list: None (keep original) or {song,title,artist,album}
-        self.cheats_dir = cheats_dir
-
-    def run(self):
-        try:
-            import eatrax_expansion as ee
-            res = ee.build_soundtrack(self.hostfs_dir, self.slots,
-                                      cheats_dir=self.cheats_dir, log=self.log_line.emit,
-                                      progress=self.log_line.emit)
-            n = res["count"]; custom = res["custom"]
-            files = ", ".join(f"_eatrax{f}.rws" for f in res["files"]) or "(originals untouched)"
-            if res.get("pnach_path"):
-                pnach_line = ("Both pnach written to your PCSX2 cheats folder:\n"
-                              "  • BEBF8793_eatrax_expansion.pnach   (your custom tracks)\n"
-                              "  • BEBF8793_hostfs.pnach             (HostFS loader)")
-            else:
-                # No cheats folder set/found — save BOTH into the HostFS folder so nothing is lost.
-                f1 = os.path.join(self.hostfs_dir, "BEBF8793_eatrax_expansion.pnach"); open(f1, "w").write(res["pnach"])
-                f2 = os.path.join(self.hostfs_dir, "BEBF8793_hostfs.pnach"); open(f2, "w").write(ee.HOSTFS_PNACH)
-                pnach_line = ("no PCSX2 cheats folder set — both pnach saved into the HostFS folder:\n"
-                              f"  {f1}\n  {f2}\n  ➜ copy them into your PCSX2 'cheats' folder.")
-            msg = (f"Soundtrack built: {n} track(s) total — {custom} custom, {n-custom} original.\n"
-                   f"Rebuilt: {files}\nNames + GLOBALUS rebuilt.\n\n"
-                   f"{pnach_line}\n\n"
-                   "In PCSX2 enable [HostFS] + [ELF Code Cave] + [EATRAX expansion] ([HostFS] + the EATRAX "
-                   "pnach are written by the tool; [ELF Code Cave] is Nahelam's).\n\n"
-                   "⚠ BOOT the small boot.iso stub that sits INSIDE your ciopfs mount folder (so PCSX2's "
-                   "host: points at the disc files) — e.g. <mount>/boot.iso (the tool builds it on extract). "
-                   "Booting the ORIGINAL loose ISO = black screen (host: would point to a folder with no game files).")
-            self.log_line.emit("✓ Done.")
-            self.finished.emit(True, msg)
-        except Exception as e:
-            self.finished.emit(False, str(e))
-
-
+# ─── Portable ISO Worker — bake the whole soundtrack into a self-contained disc ──
 class PortableIsoWorker(QObject):
-    """Bake a self-contained ISO (no cheats, no HostFS) via surgical EATRAX/globalus relocation."""
+    """Bake a self-contained ISO (no cheats, no HostFS): ≤44 renames via globalus only; 45..176 bakes the
+    EA-TRAX expansion (cave + hook + count + metadata + construct patch) into the ELF, CRC-neutralised."""
     log_line = Signal(str)
     finished = Signal(bool, str)
 
@@ -1388,178 +1347,6 @@ class PortableIsoWorker(QObject):
             self.finished.emit(False, f"{e}\n{traceback.format_exc()[-600:]}")
 
 
-class ExportWorker(QObject):
-    """Bundle the WHOLE HostFS setup into a portable, self-contained package for another PCSX2 / device:
-    the game folder (minus the .orig pristine backups) + the 3 cheats + a per-platform install README."""
-    progress = Signal(str)
-    finished = Signal(bool, str)
-    CHEATS = ("BEBF8793_eatrax_expansion.pnach", "BEBF8793_hostfs.pnach", "BEBF8793_elf_code_cave.pnach")
-
-    def __init__(self, hostfs_dir, cheats_dir, dest_root):
-        super().__init__()
-        self.hostfs_dir = hostfs_dir; self.cheats_dir = cheats_dir; self.dest_root = dest_root
-
-    def run(self):
-        try:
-            dest = os.path.join(self.dest_root, "Burnout3_CustomSoundtrack")
-            game = os.path.join(dest, "game"); cheats_out = os.path.join(dest, "cheats")
-            os.makedirs(game, exist_ok=True); os.makedirs(cheats_out, exist_ok=True)
-            # 1) game files — skip the pristine .orig backups (build-only, ~300 MB) and the boot.iso symlink
-            #    (we copy the real burnout3.iso instead, so the package is self-contained).
-            srcs = []
-            for root, _dirs, fs in os.walk(self.hostfs_dir):
-                for f in fs:
-                    if f.endswith(".orig"): continue
-                    p = os.path.join(root, f)
-                    if os.path.islink(p) and os.path.realpath(p) == os.path.realpath(
-                            os.path.join(self.hostfs_dir, "burnout3.iso")): continue
-                    srcs.append(p)
-            total = len(srcs)
-            for i, src in enumerate(srcs, 1):
-                dst = os.path.join(game, os.path.relpath(src, self.hostfs_dir))
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                shutil.copy2(src, dst)                       # follows file symlinks -> real bytes
-                if i % 25 == 0 or i == total:
-                    self.progress.emit(f"Copying game files… {i}/{total}")
-            # 2) cheats
-            copied = []
-            for c in self.CHEATS:
-                p = os.path.join(self.cheats_dir, c)
-                if os.path.isfile(p):
-                    shutil.copy2(p, os.path.join(cheats_out, c)); copied.append(c)
-            # 3) README
-            open(os.path.join(dest, "README.txt"), "w").write(self._readme(copied))
-            self.progress.emit("✓ Done.")
-            missing = [c for c in self.CHEATS if c not in copied]
-            warn = ("\n\n⚠ Couldn't find: " + ", ".join(missing) + " — enable that cheat in PCSX2 once, "
-                    "or copy it into cheats/ by hand.") if missing else ""
-            self.finished.emit(True, f"Package exported to:\n{dest}\n\n"
-                               f"• game/   ({total} files, the full game + your custom tracks)\n"
-                               f"• cheats/ ({len(copied)}/3 pnach)\n• README.txt (PC + Android setup){warn}")
-        except Exception as e:
-            import traceback
-            self.finished.emit(False, f"{e}\n{traceback.format_exc()[-500:]}")
-
-    def _readme(self, copied):
-        return (
-"BURNOUT 3: TAKEDOWN - Custom Soundtrack (HostFS package)\n"
-"========================================================\n"
-"Self-contained. Game CRC BEBF8793 (NTSC-U, SLUS-21050).\n\n"
-"CONTENTS\n"
-"  game/    the Burnout 3 files HostFS reads - your custom soundtrack is baked into\n"
-"           tracks/_eatrax*.rws + data/globalus.bin. Boot the ISO that sits in here.\n"
-"  cheats/  the 3 PCSX2 cheats this needs: " + ", ".join(copied) + "\n\n"
-"================  PC  (Windows / macOS / Linux)  ================\n"
-"1) Copy the 3 files from cheats/ into PCSX2's cheats folder:\n"
-"     Windows : Documents\\PCSX2\\cheats\n"
-"     macOS   : ~/Library/Application Support/PCSX2/cheats\n"
-"     Linux   : ~/.config/PCSX2/cheats\n"
-"     Linux (Flatpak): ~/.var/app/net.pcsx2.PCSX2/config/PCSX2/cheats\n"
-"2) PCSX2 -> Settings: enable cheats. Then in the game's cheat list TICK ALL THREE:\n"
-"     [HostFS]   [ELF Code Cave]   [EATRAX expansion]\n"
-"3) Boot the boot stub INSIDE this package:  game/boot.iso\n"
-"   It's a tiny ~4 MB ISO (just the game's ELF). HostFS then reads everything else -\n"
-"   including your custom tracks - from the loose files next to it. Boot THIS, never the\n"
-"   original loose ISO.\n"
-"   - Windows / macOS: works as-is (filesystem is case-insensitive).\n"
-"   - Linux: the files are lowercase, so mount game/ case-insensitively first:\n"
-"       ciopfs \"<path>/game\" \"<mountpoint>\"   then boot  <mountpoint>/boot.iso\n"
-"     (ciopfs = a small FUSE tool; without it host: won't find the upper-case names.)\n\n"
-"================  Android (AetherSX2 / NetherSX2)  ================\n"
-"  WARNING: many builds of these forks do NOT support HostFS (the host: redirect).\n"
-"  If yours lacks it, the +44 soundtrack will NOT load. Try it: put the cheats in the\n"
-"  app's cheats folder, make game/ reachable, enable the 3 cheats, boot game/boot.iso.\n"
-"  If it hangs/black-screens at boot, your build has no HostFS - there's no workaround\n"
-"  beyond 44 tracks on that device (use the 44-track Portable ISO instead).\n\n"
-"NOTES\n"
-"  - All three cheats must be ON together.\n"
-"  - Boot ONLY game/boot.iso - host: points at wherever the booted ISO lives, so a\n"
-"    different/original ISO = black screen.\n"
-"  - elf_code_cave.pnach is the game's own relocated code - fine for your own devices,\n"
-"    don't post it publicly.\n")
-
-
-class ExtractWorker(QObject):
-    """Extract a disc image to a HostFS folder (xorriso), lowercase names for ciopfs, drop a boot-ISO
-    symlink, and mount ciopfs if available. Runs once per folder; HostFS-only (Linux)."""
-    progress = Signal(str)
-    finished = Signal(bool, str)
-
-    def __init__(self, iso_path, out_dir):
-        super().__init__()
-        self.iso_path = iso_path; self.out_dir = out_dir
-
-    def run(self):
-        try:
-            if not shutil.which("xorriso"):
-                self.finished.emit(False, "xorriso not found — install it, or extract the ISO manually into the HostFS folder.")
-                return
-            os.makedirs(self.out_dir, exist_ok=True)
-            self.progress.emit("Extracting disc files → HostFS folder (one-time, ~1 min)…")
-            r = subprocess.run(["xorriso", "-indev", self.iso_path, "-osirrox", "on", "-extract", "/", self.out_dir],
-                               capture_output=True, text=True)
-            if r.returncode != 0:
-                self.finished.emit(False, "xorriso extract failed:\n" + (r.stderr or "")[-400:]); return
-            # xorriso extracts read-only (mirrors the ISO); make writable so we can rename + the build can write
-            for root, dirs, files in os.walk(self.out_dir):
-                for nm in dirs + files:
-                    p = os.path.join(root, nm)
-                    try: os.chmod(p, os.stat(p).st_mode | 0o200)
-                    except OSError: pass
-            self.progress.emit("Lowercasing names for ciopfs…")
-            for root, _dirs, files in os.walk(self.out_dir, topdown=False):
-                for f in files:
-                    if f != f.lower():
-                        try: os.rename(os.path.join(root, f), os.path.join(root, f.lower()))
-                        except OSError: pass
-                if root != self.out_dir:
-                    p, n = os.path.split(root)
-                    if n != n.lower():
-                        try: os.rename(root, os.path.join(p, n.lower()))
-                        except OSError: pass
-            # Build a tiny boot-stub ISO INSIDE the folder. PCSX2 sets host: = the booted ISO's directory,
-            # so the game must boot from HERE to read the custom tracks. The stub holds only the ELF +
-            # SYSTEM.CNF (~4 MB); HostFS serves everything else from this folder. This is what the user
-            # boots — so they never fall into the black-screen trap of booting the original loose ISO
-            # (whose folder has no game files). (Byte-identical to a known-good HostFS boot stub.)
-            boot = os.path.join(self.out_dir, "boot.iso")
-            elf, cnf = os.path.join(self.out_dir, "slus_210.50"), os.path.join(self.out_dir, "system.cnf")
-            if not os.path.exists(boot) and os.path.isfile(elf) and os.path.isfile(cnf):
-                self.progress.emit("Building boot.iso stub (this is what you boot in PCSX2)…")
-                stage = tempfile.mkdtemp(prefix="bootiso_")
-                try:
-                    shutil.copy2(elf, os.path.join(stage, "SLUS_210.50"))
-                    shutil.copy2(cnf, os.path.join(stage, "SYSTEM.CNF"))
-                    subprocess.run(["xorriso", "-as", "mkisofs", "-iso-level", "1", "-V", "BURNOUT3",
-                                    "-o", boot, stage], capture_output=True, text=True)
-                except Exception:
-                    pass
-                finally:
-                    shutil.rmtree(stage, ignore_errors=True)
-            # ciopfs case-insensitive view for PCSX2 (Linux); best-effort
-            mnt = self.out_dir.rstrip("/") + "_ci"
-            ciopfs = shutil.which("ciopfs") or os.path.expanduser("~/.local/bin/ciopfs")
-            note = ""
-            if os.path.exists(ciopfs):
-                os.makedirs(mnt, exist_ok=True)
-                mounted = shutil.which("mountpoint") and subprocess.run(["mountpoint", "-q", mnt]).returncode == 0
-                if not mounted:
-                    self.progress.emit("Mounting ciopfs (case-insensitive view)…")
-                    mr = subprocess.run([ciopfs, self.out_dir, mnt], capture_output=True, text=True)
-                    mounted = mr.returncode == 0
-                    if not mounted:
-                        note = f"\n⚠ ciopfs mount failed — run manually: ciopfs '{self.out_dir}' '{mnt}'"
-                if mounted:
-                    note = f"\nIn PCSX2 boot: {os.path.join(mnt, 'boot.iso')} (ciopfs mount)"
-            else:
-                note = (f"\nciopfs not found (needed on Linux for case-insensitivity). Install it, then:\n"
-                        f"  ciopfs '{self.out_dir}' '{mnt}'  →  boot {os.path.join(mnt, 'boot.iso')} in PCSX2")
-            self.finished.emit(True, self.out_dir + note)
-        except Exception as e:
-            self.finished.emit(False, str(e))
-
-
-# ─── Main Window ──────────────────────────────────────────────────────────
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1680,40 +1467,6 @@ class MainWindow(QMainWindow):
 
         self._update_inject_btn()
         self.tabs.setCurrentIndex(1)
-        self._maybe_auto_extract()
-
-    def _hostfs_ready(self, folder):
-        return (os.path.isfile(os.path.join(folder, "slus_210.50"))
-                and os.path.isdir(os.path.join(folder, "tracks"))
-                and os.path.isfile(os.path.join(folder, "data", "globalus.bin")))
-
-    def _maybe_auto_extract(self):
-        """Auto-extract the loaded ISO into the HostFS folder if that folder isn't ready yet (one-time)."""
-        if not self.iso_path:
-            return
-        folder = self.exp_folder
-        if self._hostfs_ready(folder):
-            self.exp_log.append(f'<span style="color:#69f0ae">HostFS folder ready: {folder}</span>')
-            return
-        if getattr(self, "extract_thread", None) and self.extract_thread.isRunning():
-            return
-        self.exp_log.append(f'<span style="color:#aaa">Auto-extracting ISO → {folder} (one-time setup for HostFS)…</span>')
-        self.extract_thread = QThread()
-        self.extract_worker = ExtractWorker(self.iso_path, folder)
-        self.extract_worker.moveToThread(self.extract_thread)
-        self.extract_thread.started.connect(self.extract_worker.run)
-        self.extract_worker.progress.connect(self._st_log_line)
-        self.extract_worker.finished.connect(self._extract_done)
-        self.extract_worker.finished.connect(self.extract_thread.quit)
-        self.extract_worker.finished.connect(lambda: setattr(self, "_prev_extract", self.extract_worker))
-        self.extract_thread.start()
-
-    def _extract_done(self, ok, msg):
-        if ok:
-            self.exp_log.append(f'<span style="color:#69f0ae">✓ HostFS ready: {html_mod.escape(msg)}</span>')
-            self.lbl_expfolder.setText(f"HostFS folder: {self.exp_folder}")
-        else:
-            self.exp_log.append(f'<span style="color:#ff5252">✗ Auto-extract: {html_mod.escape(msg)}</span>')
 
     def _parse_globalus_limits(self, iso_path):
         """Parse GLOBALUS.BIN from ISO to find char limits and original names for each slot."""
@@ -2030,31 +1783,25 @@ class MainWindow(QMainWindow):
         for s in list(self.assignments.keys()): self._upd_row(s)
         self.assignments.clear(); self._update_inject_btn()
 
-    # ─── SOUNDTRACK tab (HostFS — full soundtrack: replace any of 44 + add beyond) ──
+    # ─── SOUNDTRACK tab — full soundtrack: replace any of 44 + add up to 176, then build a portable ISO ──
     def _build_soundtrack_tab(self):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(16,16,16,16); lay.setSpacing(10)
         note = QLabel("The 44 originals are pre-loaded — assign a song to a slot to replace it, or add new "
-                      "ones below; untouched slots keep the original track. Names auto-romanize from any "
-                      "language. Then pick a build:\n"
-                      "  💿 PORTABLE ISO — 44 full-length + unlimited names, self-contained, no cheats (PCSX2/Android/PS2).\n"
-                      "  🛠 HostFS — adds N tracks beyond 44 (full-length); needs cheats [HostFS]+[ELF Code Cave]+[EATRAX expansion].")
+                      "ones below (up to 176 total); untouched slots keep the original track. Names "
+                      "auto-romanize from any language. Then BUILD PORTABLE ISO — a self-contained disc "
+                      "(no cheats, no HostFS) that boots in PCSX2, Android (AetherSX2/NetherSX2) and real PS2.\n"
+                      "  •  ≤44 tracks: 100% cheatless.\n"
+                      "  •  45–176 tracks: bakes the expansion into the ELF (needs the [ELF Code Cave] pnach "
+                      "in your PCSX2 cheats folder — only to read it, the ISO still runs cheatless).")
         note.setWordWrap(True)
         note.setStyleSheet("color:#888;font-size:11px;padding:10px;background:rgba(255,140,0,0.05);border:1px solid #222;border-radius:8px")
         lay.addWidget(note)
 
-        self.exp_folder = os.path.expanduser("~/burnout3_hostfs")
-        fr = QHBoxLayout()
-        self.lbl_expfolder = QLabel(f"HostFS folder: {self.exp_folder}")
-        self.lbl_expfolder.setStyleSheet("color:#4fc3f7;font-size:11px")
-        fr.addWidget(self.lbl_expfolder, 1)
-        bf = QPushButton("📂 HostFS folder"); bf.clicked.connect(self._st_choose_folder); fr.addWidget(bf)
-        lay.addLayout(fr)
-
         cr = QHBoxLayout()
-        self.cheats_dir = self._detect_cheats_dir()      # auto-detect PCSX2 cheats folder (override below)
+        self.cheats_dir = self._detect_cheats_dir()      # PCSX2 cheats folder — read the [ELF Code Cave] pnach for +44 builds
         self.lbl_cheats = QLabel()
         cr.addWidget(self.lbl_cheats, 1)
-        bch = QPushButton("📂 PCSX2 cheats"); bch.clicked.connect(self._st_choose_cheats); cr.addWidget(bch)
+        bch = QPushButton("📂 Code-cave pnach folder"); bch.clicked.connect(self._st_choose_cheats); cr.addWidget(bch)
         lay.addLayout(cr)
         self._update_cheats_label()
 
@@ -2085,29 +1832,13 @@ class MainWindow(QMainWindow):
             if wd: self.exp_table.setColumnWidth(i,wd)
         lay.addWidget(self.exp_table, 1)
 
-        self.btn_build_iso = QPushButton("💿  BUILD PORTABLE ISO   —   full-length + unlimited names · no cheats · PCSX2/Android/PS2")
+        self.btn_build_iso = QPushButton("💿  BUILD PORTABLE ISO   —   up to 176 full-length tracks · no cheats · PCSX2 / Android / PS2")
         self.btn_build_iso.setObjectName("primaryBtn"); self.btn_build_iso.setMinimumHeight(46)
         self.btn_build_iso.clicked.connect(self._st_build_portable)
         lay.addWidget(self.btn_build_iso)
-        self.btn_build_exp = QPushButton("🛠  BUILD HostFS folder   —   +tracks beyond 44 · needs PCSX2 cheats")
-        self.btn_build_exp.setMinimumHeight(38)
-        self.btn_build_exp.clicked.connect(self._st_build)
-        lay.addWidget(self.btn_build_exp)
-        self.btn_export = QPushButton("📤  EXPORT package   —   copy this whole HostFS setup + cheats to another PCSX2 / device")
-        self.btn_export.setMinimumHeight(34)
-        self.btn_export.clicked.connect(self._st_export)
-        lay.addWidget(self.btn_export)
         self.exp_log = QTextEdit(); self.exp_log.setReadOnly(True); self.exp_log.setMaximumHeight(120); lay.addWidget(self.exp_log)
         self._st_reset_all()
         return w
-
-    def _st_choose_folder(self):
-        d = QFileDialog.getExistingDirectory(self, "Select / set the HostFS folder (existing or where to extract)",
-                                             self.exp_folder)
-        if d:
-            self.exp_folder = d; self.lbl_expfolder.setText(f"HostFS folder: {d}")
-            if self.iso_path:                 # use it if ready, else extract the loaded ISO there
-                self._maybe_auto_extract()
 
     def _detect_cheats_dir(self):
         """First existing PCSX2 'cheats' folder across common install layouts (Flatpak/native/Win/mac)."""
@@ -2125,10 +1856,11 @@ class MainWindow(QMainWindow):
 
     def _update_cheats_label(self):
         if self.cheats_dir:
-            self.lbl_cheats.setText(f"PCSX2 cheats: {self.cheats_dir}")
+            self.lbl_cheats.setText(f"Code-cave pnach folder (for 45+ builds): {self.cheats_dir}")
             self.lbl_cheats.setStyleSheet("color:#69f0ae;font-size:11px")
         else:
-            self.lbl_cheats.setText("PCSX2 cheats: not found — pick your folder (else the pnach is saved into the HostFS folder)")
+            self.lbl_cheats.setText("Code-cave pnach folder: not found — only needed to build 45+ tracks "
+                                    "(point it at the PCSX2 'cheats' folder that has BEBF8793_elf_code_cave.pnach)")
             self.lbl_cheats.setStyleSheet("color:#ffaa00;font-size:11px")
 
     def _st_choose_cheats(self):
@@ -2266,102 +1998,15 @@ class MainWindow(QMainWindow):
         else:
             self.lbl_expcount.setStyleSheet("color:#ff8c00;font-weight:bold")
         self.lbl_expcount.setText(msg)
-        # The portable ISO now handles the FULL range (≤176): ≤44 cheatless, 45..176 bakes the expansion
-        # into the ELF (needs the [ELF Code Cave] pnach). HostFS stays as the alternative for 45..176.
-        expansion = n > 44
+        # The portable ISO handles the FULL range: ≤44 cheatless, 45..176 bakes the expansion into the ELF.
         if hasattr(self, "btn_build_iso"):
             self.btn_build_iso.setEnabled(not over_max)
             self.btn_build_iso.setToolTip(
-                f"Disabled: {n} > {HARD_MAX} tracks (8 _eatrax files x 22)." if over_max else "")
-        if hasattr(self, "btn_build_exp"):
-            self.btn_build_exp.setEnabled(expansion and not over_max)
-            self.btn_build_exp.setToolTip(
-                f"Disabled: {n} tracks exceeds the file-routing limit of {HARD_MAX} (8 _eatrax files x 22). "
-                "Remove some tracks." if over_max else
-                "" if expansion else
-                "Disabled: only needed for +tracks beyond 44. Add tracks past 44 to enable it.")
-
-    def _st_build(self):
-        n = self.exp_table.rowCount()
-        if getattr(self, "extract_thread", None) and self.extract_thread.isRunning():
-            QMessageBox.information(self, "", "Still extracting the disc to the HostFS folder — wait for it to finish."); return
-        if not self._hostfs_ready(self.exp_folder):
-            QMessageBox.critical(self, "", "HostFS folder isn't ready (load the ISO so it auto-extracts, or pick the extracted-disc folder)."); return
-        if self.worker_thread and self.worker_thread.isRunning():
-            QMessageBox.warning(self, "", "Already processing."); return
-        if not self.deps.get("ffmpeg"):
-            QMessageBox.critical(self, "", "ffmpeg not found."); return
-        slots = []; custom = 0
-        for r in range(n):
-            si = self.exp_table.item(r, 1); fp = si.data(Qt.ItemDataRole.UserRole) if si else None
-            if fp and os.path.isfile(fp):
-                def cell(c): it = self.exp_table.item(r, c); return (it.text().strip() if it else "")
-                slots.append({"song": fp, "title": cell(2) or os.path.splitext(os.path.basename(fp))[0],
-                              "artist": cell(3), "album": cell(4)})
-                custom += 1
-            else:
-                slots.append(None)
-        if custom == 0:
-            QMessageBox.warning(self, "", "Assign at least one song (replace a slot or add new ones)."); return
-        cheats = self.cheats_dir if (self.cheats_dir and os.path.isdir(self.cheats_dir)) else None
-        self.btn_build_exp.setEnabled(False); self.btn_build_exp.setText("⏳ BUILDING..."); self.exp_log.clear()
-        self.worker_thread = QThread()
-        self.exp_worker = ExpansionWorker(self.exp_folder, slots, cheats)
-        self.exp_worker.moveToThread(self.worker_thread)
-        self.worker_thread.started.connect(self.exp_worker.run)
-        self.exp_worker.log_line.connect(self._st_log_line)
-        self.exp_worker.finished.connect(self._st_done)
-        self.exp_worker.finished.connect(self.worker_thread.quit)
-        self.exp_worker.finished.connect(lambda: setattr(self, "_prev_exp_worker", self.exp_worker))
-        self.worker_thread.start()
+                f"Disabled: {n} > {HARD_MAX} tracks (8 _eatrax files x 22). Remove some." if over_max else "")
 
     def _st_log_line(self, s):
         c = "#69f0ae" if s.startswith("✓") else "#ff5252" if s.startswith("✗") else "#aaa"
         self.exp_log.append(f'<span style="color:{c}">{html_mod.escape(s)}</span>')
-
-    def _st_done(self, ok, msg):
-        self.btn_build_exp.setEnabled(True)
-        self.btn_build_exp.setText("🛠  BUILD HostFS folder   —   +tracks beyond 44 · needs PCSX2 cheats")
-        if ok:
-            QMessageBox.information(self, "Soundtrack built!", msg)
-        else:
-            QMessageBox.critical(self, "Error", msg)
-
-    def _st_export(self):
-        if not self._hostfs_ready(self.exp_folder):
-            QMessageBox.critical(self, "", "HostFS folder isn't ready — build your soundtrack first."); return
-        if self.worker_thread and self.worker_thread.isRunning():
-            QMessageBox.warning(self, "", "Already processing."); return
-        cheats = self.cheats_dir if (self.cheats_dir and os.path.isdir(self.cheats_dir)) else None
-        if not cheats or not os.path.isfile(os.path.join(cheats, "BEBF8793_eatrax_expansion.pnach")):
-            QMessageBox.warning(self, "", "Build the HostFS soundtrack first so the cheats exist "
-                                "(and set your PCSX2 cheats folder)."); return
-        dest = QFileDialog.getExistingDirectory(self, "Export to… (pick a folder / USB drive)",
-                                                os.path.expanduser("~"))
-        if not dest: return
-        if QMessageBox.question(self, "Export package",
-                "This copies the WHOLE HostFS folder (full game + your custom tracks, several GB) plus the "
-                "3 cheats and a setup README into a self-contained package.\n\nContinue?"
-                ) != QMessageBox.StandardButton.Yes:
-            return
-        self.btn_export.setEnabled(False); self.btn_export.setText("⏳ EXPORTING…"); self.exp_log.clear()
-        self.worker_thread = QThread()
-        self.export_worker = ExportWorker(self.exp_folder, cheats, dest)
-        self.export_worker.moveToThread(self.worker_thread)
-        self.worker_thread.started.connect(self.export_worker.run)
-        self.export_worker.progress.connect(self._st_log_line)
-        self.export_worker.finished.connect(self._st_export_done)
-        self.export_worker.finished.connect(self.worker_thread.quit)
-        self.export_worker.finished.connect(lambda: setattr(self, "_prev_export_worker", self.export_worker))
-        self.worker_thread.start()
-
-    def _st_export_done(self, ok, msg):
-        self.btn_export.setEnabled(True)
-        self.btn_export.setText("📤  EXPORT package   —   copy this whole HostFS setup + cheats to another PCSX2 / device")
-        if ok:
-            QMessageBox.information(self, "Package exported!", msg)
-        else:
-            QMessageBox.critical(self, "Error", msg)
 
     def _st_build_portable(self):
         n = self.exp_table.rowCount()
@@ -2391,9 +2036,9 @@ class MainWindow(QMainWindow):
             if os.path.isfile(cp): cave_pnach = cp
         if len(slots) > 44:
             if not cave_pnach:
-                QMessageBox.critical(self, "", "A +44 portable ISO needs the [ELF Code Cave] pnach "
-                    "(BEBF8793_elf_code_cave.pnach) in your PCSX2 cheats folder. Set the cheats folder "
-                    "(📂 PCSX2 cheats) so the tool can read it, or build with ≤44 tracks (no cheat needed).")
+                QMessageBox.critical(self, "", "A 45+ portable ISO needs the [ELF Code Cave] pnach "
+                    "(BEBF8793_elf_code_cave.pnach). Point the “📂 Code-cave pnach folder” button at the "
+                    "PCSX2 cheats folder that has it, or build with ≤44 tracks (no pnach needed).")
                 return
             if QMessageBox.question(self, "Portable ISO (+tracks)",
                     f"Bake {len(slots)} tracks into a self-contained ISO (no cheats, no HostFS)?\n\n"
@@ -2426,7 +2071,7 @@ class MainWindow(QMainWindow):
 
     def _st_iso_done(self, ok, msg):
         self.btn_build_iso.setEnabled(True)
-        self.btn_build_iso.setText("💿  BUILD PORTABLE ISO   —   full-length + unlimited names · no cheats · PCSX2/Android/PS2")
+        self.btn_build_iso.setText("💿  BUILD PORTABLE ISO   —   up to 176 full-length tracks · no cheats · PCSX2 / Android / PS2")
         if ok:
             QMessageBox.information(self, "Portable ISO built!", msg)
         else:
@@ -2530,22 +2175,22 @@ class MainWindow(QMainWindow):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(24,24,24,24)
         i = QTextEdit(); i.setReadOnly(True)
         i.setHtml("""<div style="font-family:monospace;color:#ccc;line-height:1.8">
-        <h2 style="color:#ff4500">📖 Guide — v11.2</h2>
+        <h2 style="color:#ff4500">📖 Guide — v12.2</h2>
         <h3 style="color:#ff8c00">How to Use</h3>
-        <p style="color:#aaa">1. Drag your Burnout 3 ISO (NTSC-U) to the ISO tab<br>
-        2. Go to SOUNDTRACK — the 44 originals are pre-loaded. Assign songs to slots<br>
-        &nbsp;&nbsp;&nbsp;(or add new ones). Title/Artist/Album auto-fill + romanize.<br>
-        3. Pick a build:<br>
-        &nbsp;&nbsp;💿 <b>PORTABLE ISO</b> — 44 full-length + unlimited names, no cheats (Android/PS2/PCSX2)<br>
-        &nbsp;&nbsp;🛠 <b>HostFS</b> — add N tracks beyond 44 (needs PCSX2 cheats)<br>
-        4. Load the resulting ISO in PCSX2 (or the HostFS folder)<br><br>
+        <p style="color:#aaa">1. Drag your Burnout 3 ISO (NTSC-U, SLUS-21050) to the ISO tab<br>
+        2. Go to SOUNDTRACK — the 44 originals are pre-loaded. Replace any slot, or add new<br>
+        &nbsp;&nbsp;&nbsp;ones (up to 176 total). Title/Artist/Album auto-fill + romanize from any language.<br>
+        3. Click 💿 <b>BUILD PORTABLE ISO</b> — a self-contained disc, no cheats, no HostFS:<br>
+        &nbsp;&nbsp;•&nbsp;≤44 tracks → 100% cheatless (ELF untouched, game CRC preserved)<br>
+        &nbsp;&nbsp;•&nbsp;45–176 tracks → bakes the EA-TRAX expansion into the ELF (needs the<br>
+        &nbsp;&nbsp;&nbsp;&nbsp;[ELF Code Cave] pnach in your PCSX2 cheats folder, read once at build time)<br>
+        4. Load the ISO in PCSX2 / AetherSX2 / NetherSX2 / real PS2 — game cheats OFF.<br><br>
         Supported formats: MP3, M4A, FLAC, OGG, WAV, OPUS, WMA, AAC</p>
         <h3 style="color:#ff8c00">Song Names</h3>
         <p style="color:#aaa">
-        Custom song names are patched into DATA/GLOBALUS.BIN (UTF-16).<br>
-        The Title, Artist, and Album columns in the track table are<br>
-        written to the in-game EA Trax display.<br>
-        <b style="color:#ffaa00">Note:</b> Names longer than the original are truncated to fit.</p>
+        Names go into DATA/GLOBALUS.BIN (UTF-16) and show in the in-game EA Trax list.<br>
+        Any script (Japanese, Korean, Cyrillic, Greek, …) is auto-romanized to the<br>
+        Latin font the game uses. Full names are kept — very long titles just wrap.</p>
         <h3 style="color:#ff8c00">Audio</h3>
         <p style="color:#aaa">
         Codec: <b style="color:#4fc3f7">PS-ADPCM 4-bit</b> (PlayStation 2)<br>
@@ -2557,20 +2202,16 @@ class MainWindow(QMainWindow):
         Pre-filter: lowpass 15.5kHz · soxr 28-bit resampler<br>
         Loudness: <b style="color:#4fc3f7">2-pass loudnorm ~-10 LUFS</b> (matches EA Trax)<br>
         Compression: 3.5:1 (56 bytes PCM → 16 bytes ADPCM)</p>
-        <h3 style="color:#ff8c00">Space &amp; Scaling</h3>
+        <h3 style="color:#ff8c00">Tracks &amp; Space</h3>
         <p style="color:#aaa">
-        EATRAX0 (slots 1-22): <b>149 MB</b> fixed<br>
-        EATRAX1 (slots 23-44): <b>150 MB</b> fixed<br>
-        When songs exceed available space, all are scaled proportionally.<br>
-        Fewer songs = more space per song = less scaling needed.<br>
-        With 44 songs of ~5 min each: ~74% of each song fits (~3.5 min).<br>
-        With 15 songs: most fit completely without scaling.</p>
+        Each <b>_EATRAXn.RWS</b> holds 22 <b>full-length</b> tracks. The portable build relocates them to the<br>
+        disc end (no fixed-size cap, no scaling) and adds files as needed — the ISO just grows.<br>
+        Hard limit: <b>176 tracks</b> (8 files × 22) — the game's filename routing tops out there.</p>
         <h3 style="color:#ff8c00">ISO Structure</h3>
         <p style="color:#aaa"><code style="color:#69f0ae">
-        SLUS_210.50 → Executable<br>
+        SLUS_210.50 → Executable (game CRC kept at BEBF8793)<br>
         DATA/GLOBALUS.BIN → Song names (UTF-16)<br>
-        <b>TRACKS/_EATRAX0.RWS → Music 1-22</b><br>
-        <b>TRACKS/_EATRAX1.RWS → Music 23-44</b><br>
+        <b>TRACKS/_EATRAX0..7.RWS → Music (22 tracks each)</b><br>
         TRACKS/[maps]/ → Track data<br>
         SOUND/ → SFX .RWS</code></p>
         <h3 style="color:#ff8c00">Dependencies</h3>
