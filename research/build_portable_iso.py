@@ -142,6 +142,8 @@ def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None, cave
     Everything else stays byte-identical at its original LBA, so the disc still boots."""
     b3 = _load("burnout3_gui", os.path.join(HERE, "..", "burnout3_gui.py"))
     ee = _load("eatrax_expansion", os.path.join(HERE, "..", "eatrax_expansion.py"))
+    if cave_pnach is None:
+        cave_pnach = os.path.join(HERE, "elf_code_cave.pnach")    # bundled with the tool (no separate download)
     slots = list(slots)
     N = len(slots)
     custom = [g for g, s in enumerate(slots) if s and s.get("song")]

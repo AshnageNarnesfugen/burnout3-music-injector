@@ -1788,22 +1788,13 @@ class MainWindow(QMainWindow):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(16,16,16,16); lay.setSpacing(10)
         note = QLabel("The 44 originals are pre-loaded — assign a song to a slot to replace it, or add new "
                       "ones below (up to 176 total); untouched slots keep the original track. Names "
-                      "auto-romanize from any language. Then BUILD PORTABLE ISO — a self-contained disc "
-                      "(no cheats, no HostFS) that boots in PCSX2, Android (AetherSX2/NetherSX2) and real PS2.\n"
-                      "  •  ≤44 tracks: 100% cheatless.\n"
-                      "  •  45–176 tracks: bakes the expansion into the ELF (needs the [ELF Code Cave] pnach "
-                      "in your PCSX2 cheats folder — only to read it, the ISO still runs cheatless).")
+                      "auto-romanize from any language. Then BUILD PORTABLE ISO — one self-contained disc, "
+                      "no cheats, no HostFS, no extra downloads, that boots in PCSX2, Android "
+                      "(AetherSX2/NetherSX2) and real PS2. Everything is baked into the ISO; run it with the "
+                      "game's cheats OFF.")
         note.setWordWrap(True)
         note.setStyleSheet("color:#888;font-size:11px;padding:10px;background:rgba(255,140,0,0.05);border:1px solid #222;border-radius:8px")
         lay.addWidget(note)
-
-        cr = QHBoxLayout()
-        self.cheats_dir = self._detect_cheats_dir()      # PCSX2 cheats folder — read the [ELF Code Cave] pnach for +44 builds
-        self.lbl_cheats = QLabel()
-        cr.addWidget(self.lbl_cheats, 1)
-        bch = QPushButton("📂 Code-cave pnach folder"); bch.clicked.connect(self._st_choose_cheats); cr.addWidget(bch)
-        lay.addLayout(cr)
-        self._update_cheats_label()
 
         tb = QHBoxLayout()
         bl = QPushButton("📁 Add folder"); bl.clicked.connect(self._st_add_folders); tb.addWidget(bl)
@@ -1839,35 +1830,6 @@ class MainWindow(QMainWindow):
         self.exp_log = QTextEdit(); self.exp_log.setReadOnly(True); self.exp_log.setMaximumHeight(120); lay.addWidget(self.exp_log)
         self._st_reset_all()
         return w
-
-    def _detect_cheats_dir(self):
-        """First existing PCSX2 'cheats' folder across common install layouts (Flatpak/native/Win/mac)."""
-        home = os.path.expanduser("~")
-        for c in (
-            os.path.join(home, ".var/app/net.pcsx2.PCSX2/config/PCSX2/cheats"),  # Linux Flatpak
-            os.path.join(home, ".config/PCSX2/cheats"),                          # Linux native / AppImage
-            os.path.join(home, "Documents/PCSX2/cheats"),                        # Windows
-            os.path.join(home, "AppData/Roaming/PCSX2/cheats"),                  # Windows (alt)
-            os.path.join(home, "Library/Application Support/PCSX2/cheats"),      # macOS
-        ):
-            if os.path.isdir(c):
-                return c
-        return None
-
-    def _update_cheats_label(self):
-        if self.cheats_dir:
-            self.lbl_cheats.setText(f"Code-cave pnach folder (for 45+ builds): {self.cheats_dir}")
-            self.lbl_cheats.setStyleSheet("color:#69f0ae;font-size:11px")
-        else:
-            self.lbl_cheats.setText("Code-cave pnach folder: not found — only needed to build 45+ tracks "
-                                    "(point it at the PCSX2 'cheats' folder that has BEBF8793_elf_code_cave.pnach)")
-            self.lbl_cheats.setStyleSheet("color:#ffaa00;font-size:11px")
-
-    def _st_choose_cheats(self):
-        d = QFileDialog.getExistingDirectory(self, "Select your PCSX2 'cheats' folder",
-                                             self.cheats_dir or os.path.expanduser("~"))
-        if d:
-            self.cheats_dir = d; self._update_cheats_label()
 
     def _st_romanizer(self):
         try:
@@ -2028,23 +1990,13 @@ class MainWindow(QMainWindow):
         for g, s in enumerate(slots):                    # the >44 path can't leave gaps past the originals
             if s is None and g >= 44:
                 QMessageBox.critical(self, "", f"Slot {g+1} is empty — slots beyond 44 must have a song."); return
-        # >44 portable bakes the full expansion into the ELF; it needs the [ELF Code Cave] pnach to free
-        # the region the metadata lives in (the cave is freed by baking its relocation). <=44 needs nothing.
-        cave_pnach = None
-        if self.cheats_dir:
-            cp = os.path.join(self.cheats_dir, "BEBF8793_elf_code_cave.pnach")
-            if os.path.isfile(cp): cave_pnach = cp
+        # >44 bakes the full expansion (digit hook + relocated metadata + the bundled code-cave) into the
+        # ELF, CRC-neutralised so graphics stay correct. The code-cave is shipped with the tool — no download.
         if len(slots) > 44:
-            if not cave_pnach:
-                QMessageBox.critical(self, "", "A 45+ portable ISO needs the [ELF Code Cave] pnach "
-                    "(BEBF8793_elf_code_cave.pnach). Point the “📂 Code-cave pnach folder” button at the "
-                    "PCSX2 cheats folder that has it, or build with ≤44 tracks (no pnach needed).")
-                return
             if QMessageBox.question(self, "Portable ISO (+tracks)",
-                    f"Bake {len(slots)} tracks into a self-contained ISO (no cheats, no HostFS)?\n\n"
-                    "It bakes the digit hook + relocated metadata + the code-cave into the ELF and keeps the "
-                    "game CRC intact (CRC-neutral) so graphics stay correct. Boots in PCSX2 / Android / PS2.\n\n"
-                    "⚠ Turn OFF the game's cheats in PCSX2 when running this ISO (it's all baked in)."
+                    f"Bake {len(slots)} tracks into a self-contained ISO (no cheats, no HostFS, nothing to "
+                    "download)?\n\nIt boots in PCSX2 / Android (AetherSX2/NetherSX2) / real PS2.\n\n"
+                    "⚠ Turn OFF the game's cheats in PCSX2 when running this ISO — it's all baked in."
                     ) != QMessageBox.StandardButton.Yes:
                 return
         # Reuse the ISO already loaded in the ISO tab; only ask if none is loaded.
@@ -2180,10 +2132,11 @@ class MainWindow(QMainWindow):
         <p style="color:#aaa">1. Drag your Burnout 3 ISO (NTSC-U, SLUS-21050) to the ISO tab<br>
         2. Go to SOUNDTRACK — the 44 originals are pre-loaded. Replace any slot, or add new<br>
         &nbsp;&nbsp;&nbsp;ones (up to 176 total). Title/Artist/Album auto-fill + romanize from any language.<br>
-        3. Click 💿 <b>BUILD PORTABLE ISO</b> — a self-contained disc, no cheats, no HostFS:<br>
-        &nbsp;&nbsp;•&nbsp;≤44 tracks → 100% cheatless (ELF untouched, game CRC preserved)<br>
-        &nbsp;&nbsp;•&nbsp;45–176 tracks → bakes the EA-TRAX expansion into the ELF (needs the<br>
-        &nbsp;&nbsp;&nbsp;&nbsp;[ELF Code Cave] pnach in your PCSX2 cheats folder, read once at build time)<br>
+        3. Click 💿 <b>BUILD PORTABLE ISO</b> — one self-contained disc, no cheats, no HostFS,<br>
+        &nbsp;&nbsp;&nbsp;nothing to download:<br>
+        &nbsp;&nbsp;•&nbsp;≤44 tracks → ELF untouched, game CRC preserved<br>
+        &nbsp;&nbsp;•&nbsp;45–176 tracks → bakes the EA-TRAX expansion + the bundled code-cave into the ELF,<br>
+        &nbsp;&nbsp;&nbsp;&nbsp;CRC-neutralised so graphics stay correct<br>
         4. Load the ISO in PCSX2 / AetherSX2 / NetherSX2 / real PS2 — game cheats OFF.<br><br>
         Supported formats: MP3, M4A, FLAC, OGG, WAV, OPUS, WMA, AAC</p>
         <h3 style="color:#ff8c00">Song Names</h3>
