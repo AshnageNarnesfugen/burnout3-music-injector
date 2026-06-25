@@ -264,17 +264,18 @@ def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None, cave
         # confirm-crash (search loop overrun). All fixes are plain instruction rewrites (+ a PLOC byte-bake).
         def _patchw(va, word): struct.pack_into("<I", buf, eoff + ee._fo(va), word & 0xFFFFFFFF)
         def _getw(va): return struct.unpack_from("<I", buf, eoff + ee._fo(va))[0]
-        # field-move: relocate the count/flag fields obj[64/68/72/73/104/108/109] (range [57..109]) OUT of the
-        # order-array overflow into a free BSS block at 0x1E78900 (each accessor's offset X -> X-8129, so obj+X
-        # maps to 0x1E78900+(X-57)). Fixes the confirm-crash (the search bound then stays valid).
-        FIELDMOVE_VAS = (0x3F293C,0x3F29A0,0x3F29E4,0x3F3010,0x3F3020,0x3F3098,0x3F3288,0x3F32F0,0x3F3350,
-            0x3FB7E8,0x3FB8B0,0x3FB8B4,0x3FB8EC,0x3FB904,0x3FB9C0,0x3FB9D8,0x3FB9E8,0x3FBE28,0x3FBEB4,
-            0x3FBEC0,0x3FBEC4,0x3FBEDC,0x3FBF14,0x3FBF24,0x3FBF6C,0x3FC028,0x3FC090,0x3FC098,0x3FCD90,
-            0x3FCD9C,0x3FCE8C,0x3FCE94,0x3FCEF8,0x3FCF58,0x3FCF74,0x3FD108,0x3FD8C8,0x3FDAB0,0x3FDB68,
-            0x3FDE8C,0x3FDE98,0x3FDEA0,0x3FDFB8,0x3FDFC0)
-        for va in FIELDMOVE_VAS:
-            w = _getw(va); X = struct.unpack("<h", struct.pack("<H", w & 0xFFFF))[0]   # signed accessor offset
-            _patchw(va, (w & 0xFFFF0000) | ((X - 8129) & 0xFFFF))
+        # The EATRAX object (@0x1E7A888) is laid out for 44 tracks: the per-track play-ORDER array at obj[13]
+        # (1 byte/track) OVERFLOWS, for >44 tracks, into the obj's other state — a word-array @obj[88] (whose
+        # elements include obj[104] & obj[108]) and the menu control-block @obj+104 (its row-count = obj[108]).
+        # Clobbering that state caused the menu confirm-crash, the infinite list, AND an in-game crash when an
+        # event (collision / song-end / race-end) re-reads the now-garbage state. Relocating individual fields
+        # only DESYNCS them (the word-array reaches the same bytes via obj[88+i*4]). The clean root fix:
+        # relocate the ORDER ARRAY itself out of the obj to a free BSS slot, so nothing else is touched.
+        ORDER_OFF = (0x1E7AA90 - 0x1E7A888) & 0xFFFF    # obj[13] -> 0x1E7AA90 (free gap right after the obj buffers)
+        for va in (0x3F3A0C,0x3FB8DC,0x3FB914,0x3FB968,0x3FB978,0x3FB97C,0x3FB980,    # all 13 obj[13] accessors
+                   0x3FBED0,0x3FBF7C,0x3FBFD0,0x3FBFE0,0x3FBFE4,0x3FBFE8):            # (init/shuffle/search/play)
+            w = _getw(va); assert (w & 0xFFFF) == 13, f"0x{va:X} not an obj[13] accessor"
+            _patchw(va, (w & 0xFFFF0000) | ORDER_OFF)
         # PLOC (per-track play-loc setting array): the game's 0x4F5040 is BSS sized for 44; relocate every
         # accessor to a cave-resident copy (PLOC, sized for N) and bake it to 0x0F (=ALL) — the cave is freed
         # *code* (garbage) otherwise. form-B accessors load 0x4F5040 directly; form-A load 0x4EE040 then +0x7000.
@@ -297,7 +298,7 @@ def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None, cave
         # navigation row-count = ctrl[4] = obj[108] (clobbered by the order array) -> hardcode both reads to N.
         _patchw(0x431194, 0x24030000 | (N & 0xFFFF))             # li $v1,N  (render bound; was lw $v1,4($v1))
         _patchw(0x431684, 0x24030000 | (N & 0xFFFF))             # li $v1,N  (down-nav bound)
-        log(f"  per-track play-loc fixes: field-move(44) + PLOC reloc(16)+bake + metadata->CAVE + nav-count={N}")
+        log(f"  per-track fixes: order-array relocated(13) + PLOC reloc(16)+bake + metadata->CAVE + nav-count={N}")
         # (f) CRC-NEUTRAL: keep the ELF XOR-CRC at 0xBEBF8793 so PCSX2 keeps Burnout 3's graphics fixes.
         n4 = ssz - (ssz % 4)
         words = array.array("I"); words.frombytes(bytes(buf[eoff:eoff + n4]))   # host is little-endian (x86)
