@@ -33,7 +33,14 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QSplitter, QCheckBox
 )
 from PySide6.QtCore import Qt, Signal, QObject, QThread
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtGui import QColor, QPalette, QIcon
+
+
+def _resource_path(name):
+    """Resolve a bundled asset — works from source and from a PyInstaller --onefile build."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
+
 
 # ─── Burnout 3 ISO Knowledge ─────────────────────────────────────────────
 KNOWN_DISC_IDS = {
@@ -1351,6 +1358,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Burnout 3: Takedown — Custom Music Injector v11.2")
+        self.setWindowIcon(QIcon(_resource_path("bnmex.ico")))
         self.setMinimumSize(1050, 750)
         self.resize(1150, 850)
         self.iso_path = None
@@ -2179,6 +2187,7 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv); app.setStyle("Fusion"); app.setStyleSheet(STYLESHEET)
+    app.setWindowIcon(QIcon(_resource_path("bnmex.ico")))
     p = QPalette()
     for role, color in [(QPalette.ColorRole.Window,"#0d0d0d"),(QPalette.ColorRole.WindowText,"#e0e0e0"),
         (QPalette.ColorRole.Base,"#111"),(QPalette.ColorRole.Text,"#e0e0e0"),
