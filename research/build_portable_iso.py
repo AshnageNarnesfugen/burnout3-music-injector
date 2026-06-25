@@ -256,6 +256,48 @@ def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None, cave
         struct.pack_into("<I", buf, eoff + ee._fo(CONSTRUCT_LUI_VA), 0x3C020000 | (CAVE >> 16))      # lui $v0,hi
         struct.pack_into("<I", buf, eoff + ee._fo(CONSTRUCT_ORI_VA), 0x34450000 | (CAVE & 0xFFFF))   # ori $a1,$v0,lo
         log(f"  baked hook + count={N} + metadata @0x{CAVE:X} + construct patch (obj[0xB4]->CAVE)")
+        # (e2) PER-TRACK PLAY-LOCATION fixes for the EA TRAX list menu. Without these, >44 tracks CRASH on
+        # "set all + confirm", show infinite garbage past the last track, and the play-loc default varies.
+        # Root cause (see memory eatrax-menu-list-playloc): the list "control block" pointer is set to obj+104
+        # (by 0x3FC040), so its row-count ctrl[4] = obj[108] lives INSIDE the per-track play-ORDER array
+        # (obj[13+i], one byte/track). For count>91 the array overwrites obj[104..] -> garbage count + the
+        # confirm-crash (search loop overrun). All fixes are plain instruction rewrites (+ a PLOC byte-bake).
+        def _patchw(va, word): struct.pack_into("<I", buf, eoff + ee._fo(va), word & 0xFFFFFFFF)
+        def _getw(va): return struct.unpack_from("<I", buf, eoff + ee._fo(va))[0]
+        # field-move: relocate the count/flag fields obj[64/68/72/73/104/108/109] (range [57..109]) OUT of the
+        # order-array overflow into a free BSS block at 0x1E78900 (each accessor's offset X -> X-8129, so obj+X
+        # maps to 0x1E78900+(X-57)). Fixes the confirm-crash (the search bound then stays valid).
+        FIELDMOVE_VAS = (0x3F293C,0x3F29A0,0x3F29E4,0x3F3010,0x3F3020,0x3F3098,0x3F3288,0x3F32F0,0x3F3350,
+            0x3FB7E8,0x3FB8B0,0x3FB8B4,0x3FB8EC,0x3FB904,0x3FB9C0,0x3FB9D8,0x3FB9E8,0x3FBE28,0x3FBEB4,
+            0x3FBEC0,0x3FBEC4,0x3FBEDC,0x3FBF14,0x3FBF24,0x3FBF6C,0x3FC028,0x3FC090,0x3FC098,0x3FCD90,
+            0x3FCD9C,0x3FCE8C,0x3FCE94,0x3FCEF8,0x3FCF58,0x3FCF74,0x3FD108,0x3FD8C8,0x3FDAB0,0x3FDB68,
+            0x3FDE8C,0x3FDE98,0x3FDEA0,0x3FDFB8,0x3FDFC0)
+        for va in FIELDMOVE_VAS:
+            w = _getw(va); X = struct.unpack("<h", struct.pack("<H", w & 0xFFFF))[0]   # signed accessor offset
+            _patchw(va, (w & 0xFFFF0000) | ((X - 8129) & 0xFFFF))
+        # PLOC (per-track play-loc setting array): the game's 0x4F5040 is BSS sized for 44; relocate every
+        # accessor to a cave-resident copy (PLOC, sized for N) and bake it to 0x0F (=ALL) — the cave is freed
+        # *code* (garbage) otherwise. form-B accessors load 0x4F5040 directly; form-A load 0x4EE040 then +0x7000.
+        PLOC = CAVE + 0x1160                                      # 0x16C650: after metadata+comp, in the free hole
+        def _reloc_addr(lui_va, lo_va, addr):                    # rewrite a lui/addiu address pair, keep regs
+            _patchw(lui_va, (_getw(lui_va) & 0xFFFF0000) | (((addr + 0x8000) >> 16) & 0xFFFF))
+            _patchw(lo_va,  (_getw(lo_va)  & 0xFFFF0000) | (addr & 0xFFFF))
+        for lui_va, lo_va in ((0x3FCA34,0x3FCA3C),(0x4218E0,0x4218E8),(0x421B2C,0x421B34),(0x45C198,0x45C1A0),(0x45C70C,0x45C714)):
+            _reloc_addr(lui_va, lo_va, PLOC)                     # form-B: base = PLOC
+        for lui_va, lo_va in ((0x3FCC2C,0x3FCC38),(0x431480,0x431484),(0x431524,0x43152C)):
+            _reloc_addr(lui_va, lo_va, PLOC - 0x7000)            # form-A: base+0x7000 = PLOC
+        for i in range(N): buf[eoff + ee._fo(PLOC) + i] = 0x0F  # bake PLOC = ALL
+        # 0x3FBB00 (list per-track metadata copy) reads ctrl[76] for the base, but the game reverts that to the
+        # 44-entry 0x4A5600 at runtime -> garbage metadata/play-loc for extras. Rework so a1 = CAVE + track*24
+        # (use the free delay-slot nop @0x3FBB10 to hold the CAVE base; route track*24 through $v1).
+        _patchw(0x3FBB10, 0x3C020000 | (CAVE >> 16))             # lui $v0,hi   (was nop)
+        _patchw(0x3FBB14, 0x00051840)                            # sll $v1,$a1,1
+        _patchw(0x3FBB1C, 0x00651821)                            # addu $v1,$v1,$a1
+        _patchw(0x3FBB20, 0x34420000 | (CAVE & 0xFFFF))          # ori $v0,$v0,lo  (was lw $v0,76($a2))
+        # navigation row-count = ctrl[4] = obj[108] (clobbered by the order array) -> hardcode both reads to N.
+        _patchw(0x431194, 0x24030000 | (N & 0xFFFF))             # li $v1,N  (render bound; was lw $v1,4($v1))
+        _patchw(0x431684, 0x24030000 | (N & 0xFFFF))             # li $v1,N  (down-nav bound)
+        log(f"  per-track play-loc fixes: field-move(44) + PLOC reloc(16)+bake + metadata->CAVE + nav-count={N}")
         # (f) CRC-NEUTRAL: keep the ELF XOR-CRC at 0xBEBF8793 so PCSX2 keeps Burnout 3's graphics fixes.
         n4 = ssz - (ssz % 4)
         words = array.array("I"); words.frombytes(bytes(buf[eoff:eoff + n4]))   # host is little-endian (x86)

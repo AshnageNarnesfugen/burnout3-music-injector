@@ -2012,7 +2012,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "", "Output must be different from the source ISO."); return
         self.btn_build_iso.setEnabled(False); self.btn_build_iso.setText("⏳  BUILDING ISO..."); self.exp_log.clear()
         self.worker_thread = QThread()
-        self.iso_worker = PortableIsoWorker(clean, out, slots, cave_pnach)
+        self.iso_worker = PortableIsoWorker(clean, out, slots)  # cave_pnach=None -> use the bundled elf_code_cave.pnach
         self.iso_worker.moveToThread(self.worker_thread)
         self.worker_thread.started.connect(self.iso_worker.run)
         self.iso_worker.log_line.connect(self._st_log_line)
