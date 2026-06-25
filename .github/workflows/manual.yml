@@ -2,7 +2,7 @@ name: Build Executables
 
 on:
   release:
-    types: [created]
+    types: [published]   # not "created": drafts have no tag yet, so the upload-to-release step fails
   workflow_dispatch:
 
 permissions:
