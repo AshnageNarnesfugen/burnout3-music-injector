@@ -47,12 +47,23 @@ def _compile_decoder():
     return lib
 
 
-def pipeline_pcm(song):
-    """song -> the encoder's input PCM (post loudnorm+resample), exactly like the GUI."""
+# Optional high-frequency "tame" (de-emphasis) — bright modern masters overload 4-bit
+# ADPCM at high freq (the deltas exceed what 4 bits can encode -> clamping/clicks). A
+# gentle high-shelf "masters for the PS2" the way the original EA Trax tracks already are.
+TAMES = {
+    "off":    "",
+    "gentle": "highshelf=f=6000:g=-3,",
+    "medium": "highshelf=f=5000:g=-5,",
+    "strong": "highshelf=f=4000:g=-9,",
+}
+
+
+def pipeline_pcm(song, tame=""):
+    """song -> the encoder's input PCM (post loudnorm+[tame]+resample), like the GUI."""
     loud = b3._loudnorm_filter(b3.LOUDNORM_TARGET, b3._loudnorm_measure(song, b3.LOUDNORM_TARGET))
     raw = tempfile.mktemp(suffix=".raw")
     subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", song,
-                    "-af", f"{loud},{b3.AUDIO_RESAMPLE_FILTER}",
+                    "-af", f"{loud},{tame}{b3.AUDIO_RESAMPLE_FILTER}",
                     "-f", "s16le", "-acodec", "pcm_s16le", "-ar", str(SR), "-ac", "2", raw],
                    check=True)
     pcm = open(raw, "rb").read(); os.remove(raw)
@@ -110,15 +121,20 @@ def report(orig, dec, name):
 
 
 def main():
-    if len(sys.argv) < 2:
-        print(__doc__); sys.exit(1)
-    song = sys.argv[1]
-    out = sys.argv[2] if len(sys.argv) > 2 else os.path.join(os.getcwd(), "adpcm_debug")
+    args = [a for a in sys.argv[1:]]
+    tame = "off"
+    if "--tame" in args:
+        i = args.index("--tame"); tame = args[i + 1]; del args[i:i + 2]
+    if not args:
+        print(__doc__ + "\n  --tame off|gentle|medium|strong   pre-tame the highs (for bright sources)")
+        sys.exit(1)
+    song = args[0]
+    out = args[1] if len(args) > 1 else os.path.join(os.getcwd(), "adpcm_debug")
     os.makedirs(out, exist_ok=True)
     lib = _compile_decoder()
 
-    print(f"[1/4] pipeline (loudnorm + resample) on {os.path.basename(song)} ...")
-    pcm = pipeline_pcm(song)
+    print(f"[1/4] pipeline (loudnorm + tame={tame} + resample) on {os.path.basename(song)} ...")
+    pcm = pipeline_pcm(song, TAMES.get(tame, ""))
     orig = np.frombuffer(pcm, dtype=np.int16)
     n_per_ch = len(orig) // 2
     size = ((n_per_ch + 7167) // 7168) * 8192
@@ -133,6 +149,14 @@ def main():
     dec_2048  = decode(lib, slot, 2)[: len(orig)]
 
     print("[4/4] write WAVs + spectrograms ...")
+    # the RAW source decoded straight to 32 kHz (NO loudnorm/tame/lowpass/encode) — so you can
+    # localise a "cut": present in source.wav -> it's the source file; appears only in orig.wav
+    # -> the loudnorm/resample; appears only in decoded.wav -> the ADPCM encoder.
+    src_raw = tempfile.mktemp(suffix=".raw")
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", song,
+                    "-f", "s16le", "-acodec", "pcm_s16le", "-ar", str(SR), "-ac", "2", src_raw], check=True)
+    src = np.frombuffer(open(src_raw, "rb").read(), dtype=np.int16); os.remove(src_raw)
+    write_wav(os.path.join(out, "source.wav"), src)
     write_wav(os.path.join(out, "orig.wav"), orig)
     write_wav(os.path.join(out, "decoded.wav"), dec_carry)
     write_wav(os.path.join(out, "decoded_reset_sb.wav"), dec_sb)

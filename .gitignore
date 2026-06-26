@@ -1,5 +1,5 @@
-# Compiled C encoder
-libpsxenc.so
+# Compiled C (encoder/decoder)
+*.so
 
 # Python
 __pycache__/
@@ -17,6 +17,9 @@ Thumbs.db
 
 # Temp
 *.tmp
+
+# PS-ADPCM round-trip diagnostic output
+adpcm_debug/
 
 # Local tooling
 .claude/
