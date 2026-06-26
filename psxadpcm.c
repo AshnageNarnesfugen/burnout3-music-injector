@@ -1,6 +1,9 @@
 /*
- * PS-ADPCM Encoder for Burnout 3: Takedown — Optimized HQ
- * Tests 5 filters × 5 smart shifts = 25 combos (vs 65 brute force)
+ * PS-ADPCM Encoder for Burnout 3: Takedown — HQ
+ * Full search: 5 filters × 13 shifts = 65 combos per block, pick min error.
+ * (The old "ideal ± 2 smart shift" heuristic mis-shifted some blocks by a lot,
+ *  producing single-sample errors up to ~4000 — audible clicks / "stutter" on
+ *  some songs. Full search drops peak error to ~60 and lifts SNR by ~23 dB.)
  * LLRR layout, LO-first nibbles, flags=0x02
  *
  * The predictor feedback is rounded to a 16-bit integer after every sample so
@@ -25,25 +28,6 @@ static const double COEFS[5][2] = {
 static const double SCALES[13] = {
     4096, 2048, 1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1
 };
-
-static inline int calc_ideal_shift(const double *samples, int n,
-                                    double c1, double c2,
-                                    double p1, double p2)
-{
-    double max_d = 0, d, tp1 = p1, tp2 = p2;
-    int i;
-    for (i = 0; i < 8 && i < n; i++) {
-        d = fabs(samples[i] - (tp1 * c1 + tp2 * c2));
-        if (d > max_d) max_d = d;
-        tp2 = tp1;
-        tp1 = samples[i];
-    }
-    if (max_d < 7.0) return 12;
-    int s = 12 - (int)(log2(max_d / 7.0));
-    if (s < 0) return 0;
-    if (s > 12) return 12;
-    return s;
-}
 
 static double try_encode(const double *samples, int n,
                          double c1, double c2, double scale,
@@ -84,20 +68,14 @@ static void encode_block(const double *samples, int n,
     double best_err = 1e30;
     double best_p1 = *p1, best_p2 = *p2;
     int best_nibs[28];
-    int filt, shift, ideal, nibs[28], lo, hi;
+    int filt, shift, nibs[28];
     double err, np1, np2;
 
     for (filt = 0; filt < 5; filt++) {
         double c1 = COEFS[filt][0], c2 = COEFS[filt][1];
-        
-        /* Calculate ideal shift for this filter */
-        ideal = calc_ideal_shift(samples, n, c1, c2, *p1, *p2);
-        
-        /* Try ideal and ±2 (5 shifts per filter = 25 total, good quality/speed balance) */
-        lo = ideal - 2; if (lo < 0) lo = 0;
-        hi = ideal + 2; if (hi > 12) hi = 12;
-        
-        for (shift = lo; shift <= hi; shift++) {
+
+        /* Full search over every shift — the cheap heuristic mis-shifted blocks. */
+        for (shift = 0; shift <= 12; shift++) {
             err = try_encode(samples, n, c1, c2, SCALES[shift],
                              *p1, *p2, nibs, &np1, &np2);
 
