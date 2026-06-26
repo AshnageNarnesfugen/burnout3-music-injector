@@ -9,7 +9,7 @@
 
 Replace the EA Trax soundtrack with your own music. Supports MP3, FLAC, M4A, OGG, WAV, OPUS, and more. Features a full GUI with drag & drop, automatic PS-ADPCM encoding, surgical ISO patching, and custom song name display.
 
-**One self-contained portable ISO** — up to **176 full-length tracks** (no truncation) with **unlimited romanized names** and working **per-track play-location** (ALL / RACE / MENU / OFF), all baked into a single ISO that boots on **PCSX2, Android (AetherSX2/NetherSX2), and real PS2 — with zero cheats and no HostFS**.
+**One self-contained portable ISO** — up to **176 full-length tracks** (no truncation) with **unlimited romanized names** and working **per-track play-location** (ALL / RACE / MENU / OFF), all baked into a single ISO that boots on **PCSX2, Android (AetherSX2/NetherSX2), and real PS2 — with zero cheats**.
 
 ## 🎬 Demo
 
@@ -28,7 +28,7 @@ Replace the EA Trax soundtrack with your own music. Supports MP3, FLAC, M4A, OGG
 ## ✨ Features
 
 - **Up to 176 tracks** — Replace any or all of the 44 EA Trax songs *and* add new ones, all baked into one self-contained ISO (a digit=track/22 ELF hook + a relocated 24-byte metadata array in a code cave, CRC-neutralised so the game still boots and keeps its graphics fixes)
-- **Full-length tracks** — A surgical ISO builder relocates the enlarged EATRAX/GLOBALUS files to the disc end (every other file stays byte-identical at its original LBA), so songs play at full length with **no cheats and no HostFS** — the ISO boots anywhere
+- **Full-length tracks** — A surgical ISO builder relocates the enlarged EATRAX/GLOBALUS files to the disc end (every other file stays byte-identical at its original LBA), so songs play at full length with **no cheats** — the ISO boots anywhere
 - **Per-track play-location** — Set each track's **ALL / RACE / MENU / OFF** in the in-game EA Trax menu — works for every track, not just the original 44 (the menu object was extended via reverse engineering so big playlists don't crash or garble)
 - **Unlimited romanized names** — Relocated GLOBALUS string table removes the per-field length limit; a built-in romanizer (ICU `Any-Latin; Latin-ASCII` + pykakasi for Japanese) converts foreign-script titles to readable Latin/romaji automatically
 - **Custom song names** — Title, Artist, and Album display in-game via GLOBALUS.BIN patching (UTF-16LE)
@@ -75,7 +75,7 @@ The C encoder (`psxadpcm.c`) auto-compiles on first run via `gcc`. If `gcc` is n
 1. **Load ISO** — Drag your Burnout 3: Takedown ISO (NTSC-U, SLUS-21050) to the ISO tab
 2. **Assign Music** — Go to the **SOUNDTRACK** tab. The 44 originals are pre-loaded — replace any, or add new ones (up to 176 total). Title/Artist/Album auto-fill from metadata and auto-romanize.
 3. **Build** — Click **💿 BUILD PORTABLE ISO**
-4. **Play** — Load the resulting ISO in PCSX2, Android (AetherSX2/NetherSX2), or a real PS2 — turn OFF any game cheats in PCSX2, it's all baked in
+4. **Play** — Load the resulting ISO in PCSX2, Android (AetherSX2/NetherSX2), or a real PS2 — everything is baked into the disc
 
 ## 🎶 How It Builds
 
@@ -85,7 +85,7 @@ Everything lives in the single **`🎶 SOUNDTRACK`** tab (pre-loads the 44 origi
 |------|--------|--------|-------|------|------|------|
 | 💿 **BUILD PORTABLE ISO** | **1–176** | **full** | **unlimited (romanized)** | ✅ | **none** | PCSX2 / Android / PS2 |
 
-> **How?** Burnout 3 reads its loose disc files by **fixed LBA**, so a normal ISO rebuild black-screens. The builder works around this surgically: it keeps every original file byte-identical at its LBA and relocates only the (enlarged) path-opened EATRAX/GLOBALUS files to the disc end. For **>44 tracks** it also bakes the whole EA-TRAX expansion (a digit ELF hook + a relocated metadata array in a freed code cave + the per-track play-location fixes) straight into the ELF, then **XOR-compensates so the game CRC stays `0xBEBF8793`** — so PCSX2 keeps Burnout 3's graphics fixes and the disc still boots. No cheats, no HostFS, nothing to download. See [`BURNOUT3_EATRAX_HANDOFF.md`](BURNOUT3_EATRAX_HANDOFF.md) for the reverse-engineering write-up.
+> **How?** Burnout 3 reads its loose disc files by **fixed LBA**, so a normal ISO rebuild black-screens. The builder works around this surgically: it keeps every original file byte-identical at its LBA and relocates only the (enlarged) path-opened EATRAX/GLOBALUS files to the disc end. For **>44 tracks** it also bakes the whole EA-TRAX expansion (a digit ELF hook + a relocated metadata array in a freed code cave + the per-track play-location fixes) straight into the ELF, then **XOR-compensates so the game CRC stays `0xBEBF8793`** — so PCSX2 keeps Burnout 3's graphics fixes and the disc still boots. No cheats, nothing to download. See [`BURNOUT3_EATRAX_HANDOFF.md`](BURNOUT3_EATRAX_HANDOFF.md) for the reverse-engineering write-up.
 
 ## 🎵 Audio Format Details
 
@@ -163,7 +163,7 @@ Contributions welcome! Areas that need help:
 
 - **PAL/JP support** — Adding support for European and Japanese ISO versions (different ELF/GLOBALUS offsets)
 
-Already done: ✅ full-length songs, ✅ **up to 176 tracks baked into a self-contained ISO (no cheats, no HostFS)**, ✅ working per-track play-location for big playlists, ✅ unlimited romanized song names, ✅ near-optimal PS-ADPCM encoder.
+Already done: ✅ full-length songs, ✅ **up to 176 tracks baked into a self-contained ISO (no cheats)**, ✅ working per-track play-location for big playlists, ✅ unlimited romanized song names, ✅ near-optimal PS-ADPCM encoder.
 
 ## 🙏 Credits & Acknowledgments
 
