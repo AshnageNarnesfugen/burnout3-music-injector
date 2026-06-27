@@ -215,8 +215,15 @@ def _compile_c_encoder():
 
 
 def _encode_python_fallback(pcm_bytes, slot_size):
-    """Pure Python encoder — slower but always works, no numpy required."""
-    import array, math
+    """Pure Python encoder — slower but always works (no numpy/gcc needed). Mirrors
+    psxadpcm.c exactly: a full 5-filter × 13-shift search per block (no heuristic) with
+    integer-accurate predictor feedback, so it yields the same quality as the C encoder
+    (just much slower — install gcc for the fast path)."""
+    import array
+    COEFS = ((0.0, 0.0), (0.9375, 0.0), (1.796875, -0.8125),
+             (1.53125, -0.859375), (1.90625, -0.9375))
+    SCALES = (4096.0, 2048.0, 1024.0, 512.0, 256.0, 128.0, 64.0,
+              32.0, 16.0, 8.0, 4.0, 2.0, 1.0)
     samples = array.array('h')  # signed 16-bit
     samples.frombytes(pcm_bytes[:len(pcm_bytes) - (len(pcm_bytes) % 2)])
     left = samples[0::2]
@@ -224,39 +231,56 @@ def _encode_python_fallback(pcm_bytes, slot_size):
 
     buf = bytearray(slot_size)
     for i in range(0, slot_size, 16):
-        buf[i] = 0x0C; buf[i+1] = 0x02
-
-    _C1, _C2 = 1.796875, -0.8125
+        buf[i] = 0x0C; buf[i + 1] = 0x02
 
     def encode_ch(src, ch_offset):
-        idx = 0; p1 = p2 = 0.0
+        idx = 0; p1 = 0.0; p2 = 0.0
         src_len = len(src)
+        blk = [0.0] * 28
         for sblock in range(0, slot_size, 8192):
             for sub in range(2):
                 for block_i in range(0, 2048, 16):
-                    boff = sblock + ch_offset + sub*2048 + block_i
-                    if boff+16 > slot_size: return
-                    max_d = 0.0; tp1=p1; tp2=p2
-                    for i2 in range(8):
-                        s = src[idx+i2] if idx+i2 < src_len else 0.0
-                        d = abs(s-(tp1*_C1+tp2*_C2))
-                        if d>max_d: max_d=d
-                        tp2=tp1; tp1=s
-                    shift = max(0,min(12, 12-int(math.log2(max(max_d/7.0,1.0)))))
-                    scale = float(1<<(12-shift))
-                    buf[boff]=(2<<4)|shift; buf[boff+1]=0x02
-                    for i2 in range(28):
-                        s = src[idx] if idx<src_len else 0.0; idx+=1
-                        pred=p1*_C1+p2*_C2
-                        raw=(s-pred)/scale if scale else 0.0
-                        nib=max(-8,min(7,int(raw+(0.5 if raw>=0 else -0.5))))
-                        dec=max(-32768.0,min(32767.0,nib*scale+pred))
-                        # Match the integer decoder: it outputs int16 and feeds that back.
-                        dec=float(int(dec+0.5) if dec>=0 else int(dec-0.5))
-                        p2=p1; p1=dec
-                        j=i2//2
-                        if i2%2==0: buf[boff+2+j]=nib&0xF
-                        else: buf[boff+2+j]|=(nib&0xF)<<4
+                    boff = sblock + ch_offset + sub * 2048 + block_i
+                    if boff + 16 > slot_size:
+                        return
+                    for i in range(28):
+                        blk[i] = src[idx + i] if idx + i < src_len else 0.0
+                    idx += 28
+                    best_err = 1e30; best_filt = 0; best_shift = 0
+                    best_nibs = [0] * 28; best_p1 = p1; best_p2 = p2
+                    done = False
+                    for filt in range(5):                       # full search (matches the C)
+                        c1, c2 = COEFS[filt]
+                        for shift in range(13):
+                            scale = SCALES[shift]
+                            err = 0.0; tp1 = p1; tp2 = p2; nibs = [0] * 28
+                            for i in range(28):
+                                s = blk[i]
+                                pred = tp1 * c1 + tp2 * c2
+                                raw = (s - pred) / scale
+                                nib = int(raw + (0.5 if raw >= 0 else -0.5))
+                                if nib < -8: nib = -8
+                                elif nib > 7: nib = 7
+                                nibs[i] = nib
+                                dec = nib * scale + pred
+                                dec = float(int(dec + 0.5) if dec >= 0 else int(dec - 0.5))
+                                if dec > 32767.0: dec = 32767.0
+                                elif dec < -32768.0: dec = -32768.0
+                                err += (s - dec) * (s - dec)
+                                tp2 = tp1; tp1 = dec
+                            if err < best_err:
+                                best_err = err; best_filt = filt; best_shift = shift
+                                best_nibs = nibs; best_p1 = tp1; best_p2 = tp2
+                                if err < 1.0:                   # near-perfect — early exit
+                                    done = True; break
+                        if done:
+                            break
+                    p1 = best_p1; p2 = best_p2
+                    buf[boff] = (best_filt << 4) | best_shift; buf[boff + 1] = 0x02
+                    for i in range(28):
+                        j = i // 2
+                        if i % 2 == 0: buf[boff + 2 + j] = best_nibs[i] & 0xF
+                        else: buf[boff + 2 + j] |= (best_nibs[i] & 0xF) << 4
 
     encode_ch(left, 0)
     encode_ch(right, 4096)
