@@ -89,10 +89,6 @@ AUDIO_EXTENSIONS = {
     ".aiff",".aif",".ape",".wv",".tta",".ac3",".mka",".mpc",".shn",
 }
 
-RWS_AUDIO_CONTAINER = 0x0000080D
-RWS_AUDIO_HEADER = 0x0000080E
-RWS_AUDIO_DATA = 0x0000080F
-
 
 # ─── Audio processing chain (shared by both encode passes) ───────────────
 # Resample to 32 kHz with high-precision soxr, then a gentle 15.5 kHz lowpass

@@ -3,20 +3,6 @@ loudnorm helpers used to bring custom music up to EA Trax's hot master level."""
 import json, math, subprocess
 
 
-def probe_duration_seconds(filepath):
-    """Use ffprobe to get audio duration in seconds. Returns None on failure."""
-    try:
-        r = subprocess.run([
-            "ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", filepath
-        ], capture_output=True, text=True, timeout=15)
-        if r.returncode == 0 and r.stdout.strip():
-            return float(r.stdout.strip())
-    except (subprocess.TimeoutExpired, ValueError, OSError):
-        pass
-    return None
-
-
 def probe_metadata(filepath):
     """Extract title, artist, album from audio file metadata via ffprobe."""
     try:
