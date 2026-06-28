@@ -1,13 +1,17 @@
-#!/usr/bin/env python3
-"""
-EA-TRAX helpers shared by the portable ISO builder (research/build_portable_iso.py): the
-digit=track/22 hook constants + ELF segment math, romanization, full-length RWS (.RWS) building,
-and GLOBALUS string-table rebuild/overwrite.
+"""EA-TRAX helpers shared by the portable ISO builder (core/portable_iso.py): the
+digit=track/22 hook constants + ELF segment math, romanization, full-length RWS (.RWS)
+building, and GLOBALUS string-table rebuild/overwrite.
 
-(The old HostFS path — build_soundtrack + the [HostFS]/[EATRAX expansion] pnach — was removed once
-the portable ISO learned to bake the whole expansion into the disc; see build_portable_iso.py.)
+(The old HostFS path — build_soundtrack + the [HostFS]/[EATRAX expansion] pnach — was
+removed once the portable ISO learned to bake the whole expansion into the disc;
+see core/portable_iso.py.)
 """
-import os, struct, subprocess, tempfile, shutil, importlib.util
+import os, struct, subprocess, shutil, importlib.util
+
+from core.constants import AUDIO_RESAMPLE_FILTER, LOUDNORM_TARGET
+from core.audio import _loudnorm_filter, _loudnorm_measure
+from core.psx_adpcm import encode_psx_adpcm_sized, adpcm_slot_duration
+from core.rws import parse_rws_tracks
 
 # ---- constants (all verified) ----
 SEG_VA, SEG_FO = 0x00100000, 0x100
@@ -20,6 +24,10 @@ BASEPTR_VA = 0x004A5A6C
 META_VA = 0x004A5600
 TRACKS_PER_FILE = 22
 
+# repo root (one level up from core/) — research/romanize.py lives there
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 def _fo(va): return SEG_FO + (va - SEG_VA)
 
 # ---- romanization (research/romanize.py) ----
@@ -29,7 +37,7 @@ def romanize(text):
     if not text:
         return ""
     if _rz is None:
-        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "research", "romanize.py")
+        p = os.path.join(_ROOT, "research", "romanize.py")
         spec = importlib.util.spec_from_file_location("romanize", p)
         _rz = importlib.util.module_from_spec(spec); spec.loader.exec_module(_rz)
     return _rz.romanize(text)
@@ -49,10 +57,10 @@ def _find_table(hdr, hsize):
                 return e0
     raise RuntimeError("RWS track table not found")
 
-def _encode_full(b3, song, tmp, tag, log):
+def _encode_full(song, tmp, tag, log):
     raw = os.path.join(tmp, f"{tag}.raw")
-    loud = b3._loudnorm_filter(b3.LOUDNORM_TARGET, b3._loudnorm_measure(song, b3.LOUDNORM_TARGET))
-    r = subprocess.run(["ffmpeg", "-y", "-i", song, "-af", f"{loud},{b3.AUDIO_RESAMPLE_FILTER}",
+    loud = _loudnorm_filter(LOUDNORM_TARGET, _loudnorm_measure(song, LOUDNORM_TARGET))
+    r = subprocess.run(["ffmpeg", "-y", "-i", song, "-af", f"{loud},{AUDIO_RESAMPLE_FILTER}",
                         "-f", "s16le", "-acodec", "pcm_s16le", "-ar", "32000", "-ac", "2", raw],
                        capture_output=True, text=True)
     if r.returncode != 0 or not os.path.isfile(raw) or os.path.getsize(raw) == 0:
@@ -60,21 +68,20 @@ def _encode_full(b3, song, tmp, tag, log):
     pcm = open(raw, "rb").read()
     n_per_ch = (len(pcm) // 2) // 2
     size = ((n_per_ch + 7167) // 7168) * 8192        # full song, superblock-aligned (no truncation)
-    return b3.encode_psx_adpcm_sized(pcm, size), size
+    return encode_psx_adpcm_sized(pcm, size), size
 
-def _build_eatrax_file(b3, base, songs_by_local, tmp, log):
+def _build_eatrax_file(base, songs_by_local, tmp, log):
     """Return a full-length _eatraxN.rws: base structure, chosen local slots replaced."""
     hsize = struct.unpack_from("<I", base, 16)[0]
-    W = b3.InjectionWorker.__new__(b3.InjectionWorker)
-    tracks, _, _ = W._parse_rws_tracks(base)
+    tracks, _, _ = parse_rws_tracks(base)
     n = len(tracks)
     hdr = bytearray(base[:24 + hsize])
     ft = _find_table(hdr, hsize)
     audio = []
     for i in range(n):
         if i in songs_by_local:
-            a, sz = _encode_full(b3, songs_by_local[i], tmp, f"t{i}", log)
-            log(f"    local {i}: {os.path.basename(songs_by_local[i])} -> {sz//1024}KB (~{b3.adpcm_slot_duration(sz):.0f}s, full)")
+            a, sz = _encode_full(songs_by_local[i], tmp, f"t{i}", log)
+            log(f"    local {i}: {os.path.basename(songs_by_local[i])} -> {sz//1024}KB (~{adpcm_slot_duration(sz):.0f}s, full)")
             audio.append(a)
         else:
             off, sz = tracks[i]; audio.append(base[off:off + sz])

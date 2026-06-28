@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a PORTABLE Burnout 3 ISO with custom music baked in (no cheats, no HostFS).
+"""Build a PORTABLE Burnout 3 ISO with custom music baked in (self-contained).
 
 Burnout 3 reads its loose disc files by FIXED LBA — re-authoring the whole ISO
 (xorriso/genisoimage) moves every file and black-screens. EXCEPT: the EA-TRAX RWS
@@ -11,16 +11,17 @@ zeroing the old copy still plays tracks 1-22). So the trick is:
   their ISO9660 directory records (extent LBA + size, LE & BE) and the PVD size.
 
 Result: full-length custom tracks in a self-contained ISO that boots anywhere
-(PCSX2, Android AetherSX2/NetherSX2, real PS2) with ZERO cheats.
+(PCSX2, Android AetherSX2/NetherSX2, real PS2) with no cheats.
 """
-import os, sys, struct, importlib.util, tempfile, shutil
+import os, sys, struct, tempfile, shutil
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+from core import eatrax as ee
 
-def _load(name, path):
-    s = importlib.util.spec_from_file_location(name, path)
-    m = importlib.util.module_from_spec(s); sys.modules[name] = m; s.loader.exec_module(m)
-    return m
+HERE = os.path.dirname(os.path.abspath(__file__))            # core/
+ROOT = os.path.dirname(HERE)                                 # repo root
+# In a PyInstaller build the bundled data root is sys._MEIPASS; research/ is bundled there.
+_DATA = getattr(sys, "_MEIPASS", ROOT)
+
 
 def find_record(buf, path):
     """Return (record_offset, extent_lba, size) of an ISO9660 path like /TRACKS/_EATRAX0.RWS."""
@@ -133,17 +134,15 @@ def add_dir_record(buf, dir_path, fname_ver, file_lba, file_size, log=print):
     log(f"  + /{dir_path.strip('/')}/{fname_ver} @LBA{file_lba} ({file_size}B), sorted pos {ins+2}/{len(ordered)}; dir {dsize}->{newsize}")
 
 def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None, cave_pnach=None):
-    """Bake a portable Burnout 3 ISO (no cheats, no HostFS) — up to 176 tracks.
+    """Bake a portable Burnout 3 ISO (self-contained) — up to 176 tracks.
 
     slots[g] = None (keep original game track) or {'song','title','artist','album'} (custom, full-length).
     <=44: rename in place via globalus only (ELF untouched, CRC preserved).
     >44 : bake the whole EA-TRAX expansion into the ELF (cave + hook + count + metadata + construct patch)
           and XOR-compensate so the game CRC stays 0xBEBF8793. Needs cave_pnach (the [ELF Code Cave] pnach).
     Everything else stays byte-identical at its original LBA, so the disc still boots."""
-    b3 = _load("burnout3_gui", os.path.join(HERE, "..", "burnout3_gui.py"))
-    ee = _load("eatrax_expansion", os.path.join(HERE, "..", "eatrax_expansion.py"))
     if cave_pnach is None:
-        cave_pnach = os.path.join(HERE, "elf_code_cave.pnach")    # bundled with the tool (no separate download)
+        cave_pnach = os.path.join(_DATA, "research", "elf_code_cave.pnach")  # bundled with the tool (no separate download)
     slots = list(slots)
     N = len(slots)
     custom = [g for g, s in enumerate(slots) if s and s.get("song")]
@@ -167,13 +166,13 @@ def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None, cave
             rec, lba, sz = find_record(buf, f"/TRACKS/_EATRAX{f}.RWS")
             base = bytes(buf[lba * 2048:lba * 2048 + sz])
             log(f"_EATRAX{f}.RWS: base {sz} B, replacing locals {sorted(files[f])}")
-            relocate(buf, rec, ee._build_eatrax_file(b3, base, files[f], tmp, log), log)
+            relocate(buf, rec, ee._build_eatrax_file(base, files[f], tmp, log), log)
         for f in sorted(files):                          # new files >=2: build from _EATRAX1 template + add record
             if f < 2: continue
             if progress: progress(f"Encoding _EATRAX{f}.RWS (new)...")
             _, l1, s1 = find_record(buf, "/TRACKS/_EATRAX1.RWS")
             base1 = bytes(buf[l1 * 2048:l1 * 2048 + s1])
-            new = ee._build_eatrax_file(b3, base1, files[f], tmp, log)
+            new = ee._build_eatrax_file(base1, files[f], tmp, log)
             lba = append_data(buf, new)
             add_dir_record(buf, "/TRACKS", f"_EATRAX{f}.RWS;1", lba, len(new), log)
     finally:
@@ -201,7 +200,7 @@ def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None, cave
         relocate(buf, grec, ee.globalus_overwrite(orig_glob, overrides, log), log)
         log(f"  renamed {len(custom)} track(s) via globalus only — ELF untouched, CRC preserved")
     else:
-        # >44, NO cheats: bake the whole EA-TRAX expansion into the ISO's ELF. The metadata must live where
+        # >44, no cheats: bake the whole EA-TRAX expansion into the ISO's ELF. The metadata must live where
         # the game won't clobber it, and the construct must be forced to use it (the game resets the baseptr
         # global at runtime). Recipe (all baked, then CRC-neutralised so PCSX2 keeps the BEBF8793 graphics fixes).
         if not (cave_pnach and os.path.isfile(cave_pnach)):
@@ -314,7 +313,8 @@ def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None, cave
     return {"out": out_iso, "custom": len(custom), "files": sorted(files), "size": len(buf), "count": N, "expansion": has_exp}
 
 if __name__ == "__main__":
-    # CLI test: clean.iso out.iso  slot:song.flac[:Title:Artist:Album] ...   (>44 needs CAVE_PNACH env)
+    # CLI test (run as a module from the repo root):  python -m core.portable_iso clean.iso out.iso
+    #   slot:song.flac[:Title:Artist:Album] ...   (>44 needs CAVE_PNACH env)
     clean, out = sys.argv[1], sys.argv[2]
     slots = [None] * 44
     for spec in sys.argv[3:]:

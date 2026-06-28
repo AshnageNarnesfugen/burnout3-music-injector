@@ -30,7 +30,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 import numpy as np
-import burnout3_gui as b3          # exact encoder + loudnorm + resample pipeline
+from core import audio, psx_adpcm          # exact encoder + loudnorm + resample pipeline
+from core.constants import LOUDNORM_TARGET, AUDIO_RESAMPLE_FILTER
 
 SR = 32000
 
@@ -60,10 +61,10 @@ TAMES = {
 
 def pipeline_pcm(song, tame=""):
     """song -> the encoder's input PCM (post loudnorm+[tame]+resample), like the GUI."""
-    loud = b3._loudnorm_filter(b3.LOUDNORM_TARGET, b3._loudnorm_measure(song, b3.LOUDNORM_TARGET))
+    loud = audio._loudnorm_filter(LOUDNORM_TARGET, audio._loudnorm_measure(song, LOUDNORM_TARGET))
     raw = tempfile.mktemp(suffix=".raw")
     subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", song,
-                    "-af", f"{loud},{tame}{b3.AUDIO_RESAMPLE_FILTER}",
+                    "-af", f"{loud},{tame}{AUDIO_RESAMPLE_FILTER}",
                     "-f", "s16le", "-acodec", "pcm_s16le", "-ar", str(SR), "-ac", "2", raw],
                    check=True)
     pcm = open(raw, "rb").read(); os.remove(raw)
@@ -141,7 +142,7 @@ def main():
     print(f"      {n_per_ch} samples/ch ({n_per_ch/SR:.1f}s) -> slot {size} B ({size//8192} super-blocks)")
 
     print("[2/4] encode (psxadpcm.c) ...")
-    slot = b3.encode_psx_adpcm_sized(pcm, size)
+    slot = psx_adpcm.encode_psx_adpcm_sized(pcm, size)
 
     print("[3/4] decode (psxdec.c) ...")
     dec_carry = decode(lib, slot, 0)[: len(orig)]

@@ -31,9 +31,9 @@ jobs:
             --icon "bnmex.ico" \
             --add-data "bnmex.ico:." \
             --add-data "psxadpcm.c:." \
-            --add-data "eatrax_expansion.py:." \
-            --add-data "burnout3_gui.py:." \
             --add-data "research:research" \
+            --collect-submodules core \
+            --collect-submodules ui \
             --collect-all pykakasi \
             --hidden-import "PySide6.QtCore" \
             --hidden-import "PySide6.QtGui" \
@@ -74,9 +74,9 @@ jobs:
             --icon "bnmex.ico" `
             --add-data "bnmex.ico;." `
             --add-data "psxadpcm.c;." `
-            --add-data "eatrax_expansion.py;." `
-            --add-data "burnout3_gui.py;." `
             --add-data "research;research" `
+            --collect-submodules core `
+            --collect-submodules ui `
             --collect-all pykakasi `
             --hidden-import "PySide6.QtCore" `
             --hidden-import "PySide6.QtGui" `
