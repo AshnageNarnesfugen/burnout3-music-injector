@@ -66,15 +66,45 @@ def relocate(buf, rec_off, new_data, log=print):
     return new_lba
 
 TRACKS_PER_FILE = 22
-META_FO = 0x100 + (0x004A5600 - 0x00100000)   # file offset of the 24-byte metadata array inside SLUS
-META_NEW_VA = 0x00485894   # free ELF zero-run — DON'T use for the metadata: it's the game's runtime data
-                           # (zero at load, clobbered during play). Kept only as a CRC-comp scratch idea.
-CAVE = 0x0016B4F0          # Nahelam code cave; freed by baking the [ELF Code Cave] patches -> metadata lives here
-# The EATRAX construct @0x3FCD20 copies the global baseptr [0x4A5A6C] into obj[0xB4] (the base used for
-# indexing entries). The game RESETS that global from ~28 sites at runtime, reverting any baked value, so we
-# patch the construct itself to force obj[0xB4]=CAVE (instead of reading the reverted global):
-CONSTRUCT_LUI_VA = 0x003FCDC8   # was: lui $v0,0x4A   -> lui $v0,(CAVE>>16)
-CONSTRUCT_ORI_VA = 0x003FCDD0   # was: lw $a1,0x5A6C($v0) -> ori $a1,$v0,(CAVE&0xFFFF)  => obj[0xB4]=CAVE
+CAVE = 0x0016B4F0          # Nahelam code cave (frees ~188KB at the SAME VA on NTSC and PAL); metadata lives here.
+ORDER_OFF = 0x208          # relocate the per-track play-ORDER array obj[13] -> obj+0x208 (a free gap in the obj)
+PLOC_CAVE_OFF = 0x1160     # NTSC PLOC copy lives at CAVE+0x1160
+
+# ─── Per-disc expansion profiles ─────────────────────────────────────────
+# The EATRAX construct copies the global baseptr into obj[0xB4]; the game RESETS that global at runtime, so
+# the >44 path patches the construct itself to force obj[0xB4]=CAVE. The cave is at the same VA on both discs;
+# the EATRAX metadata (DATA) shifted +0x310 and the menu/construct CODE shifted ~+0x420 on PAL. PAL needs ONLY
+# the order-array relocation — the extra NTSC play-loc patches (PLOC reloc + nav-count + 0x3FBB00) aren't needed
+# there, and leaving PLOC alone keeps the radio DJ playing. (See memory: burnout-pal-iso, eatrax-dj-playloc-tradeoff.)
+DISC_PROFILES = {
+    "SLUS_210.50": {   # NTSC-U (USA), game CRC BEBF8793
+        "region": "NTSC-U", "elf": "/SLUS_210.50", "globalus": ["/DATA/GLOBALUS.BIN"], "crc": 0xBEBF8793,
+        "cave_pnach": os.path.join("research", "elf_code_cave.pnach"),
+        "meta_va": 0x4A5600, "count_va": 0x4A5A24, "baseptr_va": 0x4A5A6C,
+        "hook_vas": [0x3FBCD0, 0x3FC38C], "digits_va": 0x4CEA78,
+        "construct_lui": 0x3FCDC8, "construct_ori": 0x3FCDD0,
+        "order_accessors": [0x3F3A0C, 0x3FB8DC, 0x3FB914, 0x3FB968, 0x3FB978, 0x3FB97C, 0x3FB980,
+                            0x3FBED0, 0x3FBF7C, 0x3FBFD0, 0x3FBFE0, 0x3FBFE4, 0x3FBFE8],
+        "ploc": {   # the full NTSC menu fix (PLOC reloc + 0x3FBB00 metadata-base rework + nav-count)
+            "formB": [(0x3FCA34, 0x3FCA3C), (0x4218E0, 0x4218E8), (0x421B2C, 0x421B34),
+                      (0x45C198, 0x45C1A0), (0x45C70C, 0x45C714)],
+            "formA": [(0x3FCC2C, 0x3FCC38), (0x431480, 0x431484), (0x431524, 0x43152C)],
+            "bb00": (0x3FBB10, 0x3FBB14, 0x3FBB1C, 0x3FBB20),
+            "navcount": [0x431194, 0x431684],
+        },
+    },
+    "SLES_525.85": {   # PAL (Europe, Fr/De/It), game CRC CE49B0DE
+        "region": "PAL (Fr/De/It)", "elf": "/SLES_525.85",
+        "globalus": ["/DATA/GLOBALFR.BIN", "/DATA/GLOBALGE.BIN", "/DATA/GLOBALIT.BIN"], "crc": 0xCE49B0DE,
+        "cave_pnach": os.path.join("research", "pal", "SLES-52585_elf_code_cave.pnach"),
+        "meta_va": 0x4A5910, "count_va": 0x4A5D34, "baseptr_va": 0x4A5D7C,
+        "hook_vas": [0x3FC0F0, 0x3FC7AC], "digits_va": CAVE + 0x1800,   # digit table in the cave (0x16CCF0)
+        "construct_lui": 0x3FD1E8, "construct_ori": 0x3FD1F0,
+        "order_accessors": [0x3F3D7C, 0x3FBC60, 0x3FBC98, 0x3FBCEC, 0x3FBCFC, 0x3FBD00, 0x3FBD04,
+                            0x3FC2F0, 0x3FC39C, 0x3FC3F0, 0x3FC400, 0x3FC404, 0x3FC408],
+        "ploc": None,   # PAL: the order-array relocation alone suffices (and keeps the DJ)
+    },
+}
 
 def append_data(buf, data):
     """Append data at the disc end (sector-aligned), bump PVD volume size, return its LBA."""
@@ -133,16 +163,34 @@ def add_dir_record(buf, dir_path, fname_ver, file_lba, file_size, log=print):
     struct.pack_into("<I", buf, base + 10, newsize); struct.pack_into(">I", buf, base + 14, newsize)
     log(f"  + /{dir_path.strip('/')}/{fname_ver} @LBA{file_lba} ({file_size}B), sorted pos {ins+2}/{len(ordered)}; dir {dsize}->{newsize}")
 
+def _hook_words(digits_va):
+    """The 9 digit-hook instructions, with the digit-table address baked into words 6,7 (lui at,hi; addiu at,lo)."""
+    h = list(ee.HOOK)
+    h[6] = 0x3C010000 | (((digits_va + 0x8000) >> 16) & 0xFFFF)   # lui  at,hi
+    h[7] = 0x24210000 | (digits_va & 0xFFFF)                      # addiu at,at,lo  -> at = digits_va
+    return h
+
+
+def _detect_profile(buf):
+    """Identify the disc (NTSC-U / PAL) by which game ELF its filesystem contains."""
+    for key, prof in DISC_PROFILES.items():
+        try:
+            find_record(buf, prof["elf"]); return key, prof
+        except RuntimeError:
+            pass
+    raise RuntimeError("Unrecognized Burnout 3 disc — expected NTSC-U (SLUS_210.50) or PAL (SLES_525.85). "
+                       "PAL/JP variants other than SLES-52585 aren't profiled yet.")
+
+
 def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None, cave_pnach=None):
-    """Bake a portable Burnout 3 ISO (self-contained) — up to 176 tracks.
+    """Bake a portable Burnout 3 ISO (self-contained) — up to 176 tracks. Auto-detects NTSC-U vs PAL.
 
     slots[g] = None (keep original game track) or {'song','title','artist','album'} (custom, full-length).
-    <=44: rename in place via globalus only (ELF untouched, CRC preserved).
-    >44 : bake the whole EA-TRAX expansion into the ELF (cave + hook + count + metadata + construct patch)
-          and XOR-compensate so the game CRC stays 0xBEBF8793. Needs cave_pnach (the [ELF Code Cave] pnach).
+    <=44: rename in place via globalus only (ELF untouched, the disc's game CRC preserved).
+    >44 : bake the whole EA-TRAX expansion into the ELF (cave + hook + count + metadata + construct + the
+          order-array relocation) and XOR-compensate so the game CRC stays the disc's original. Needs the
+          disc's [ELF Code Cave] pnach (bundled per region).
     Everything else stays byte-identical at its original LBA, so the disc still boots."""
-    if cave_pnach is None:
-        cave_pnach = os.path.join(_DATA, "research", "elf_code_cave.pnach")  # bundled with the tool (no separate download)
     slots = list(slots)
     N = len(slots)
     custom = [g for g, s in enumerate(slots) if s and s.get("song")]
@@ -153,6 +201,10 @@ def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None, cave
         + (" (EXPANSION: +tracks)" if has_exp else ""))
     if progress: progress("Reading ISO...")
     buf = bytearray(open(clean_iso, "rb").read())
+    disc, prof = _detect_profile(buf)
+    log(f"  disc: {disc} — {prof['region']}")
+    if cave_pnach is None:
+        cave_pnach = os.path.join(_DATA, prof["cave_pnach"])   # bundled with the tool (no separate download)
 
     # 1) AUDIO — group custom songs per _EATRAXf
     files = {}
@@ -179,48 +231,54 @@ def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None, cave
         shutil.rmtree(tmp, ignore_errors=True)
 
     # 2+3) NAMES + METADATA
-    srec, slba, ssz = find_record(buf, "/SLUS_210.50")
+    srec, slba, ssz = find_record(buf, prof["elf"])
     eoff = slba * 2048
-    grec, glba, gsz = find_record(buf, "/DATA/GLOBALUS.BIN")
-    orig_glob = bytes(buf[glba * 2048:glba * 2048 + gsz])
+    meta_fo = ee._fo(prof["meta_va"])
     if progress: progress("Rebuilding names (GLOBALUS)...")
     if not has_exp:
-        # Rename WITHOUT touching the ELF: overwrite each custom track's ORIGINAL globalus string ids
-        # in place (the unmodified ELF metadata keeps pointing at them). PCSX2 computes the game CRC by
-        # XOR-ing every ELF word, so baking new ids into the ELF would change the CRC and PCSX2 would drop
-        # its Burnout-3 graphics fixes/CRC-hacks (black sky / over-bloom). Keeping the ELF byte-identical
-        # preserves CRC BEBF8793 -> the in-game visuals stay correct.
+        # Rename WITHOUT touching the ELF: overwrite each custom track's ORIGINAL globalus string ids in
+        # place (the unmodified ELF metadata keeps pointing at them). PCSX2 computes the game CRC by XOR-ing
+        # every ELF word, so baking new ids into the ELF would change the CRC and PCSX2 would drop Burnout 3's
+        # graphics fixes (black sky / over-bloom). Keeping the ELF byte-identical preserves the disc's CRC ->
+        # visuals stay correct. PAL keeps one name table per language, so apply the same overrides to all.
         overrides = {}
         for g in custom:
-            tid, aid, rid = struct.unpack_from("<III", buf, eoff + META_FO + g * 24 + 8)  # title, album, artist ids
+            tid, aid, rid = struct.unpack_from("<III", buf, eoff + meta_fo + g * 24 + 8)  # title, album, artist ids
             s = slots[g]
             overrides[tid] = ee.romanize(s.get("title", ""))
             overrides[aid] = ee.romanize(s.get("album", ""))
             overrides[rid] = ee.romanize(s.get("artist", ""))
-        relocate(buf, grec, ee.globalus_overwrite(orig_glob, overrides, log), log)
-        log(f"  renamed {len(custom)} track(s) via globalus only — ELF untouched, CRC preserved")
+        for gpath in prof["globalus"]:
+            grec, glba, gsz = find_record(buf, gpath)
+            orig_glob = bytes(buf[glba * 2048:glba * 2048 + gsz])
+            relocate(buf, grec, ee.globalus_overwrite(orig_glob, overrides, log), log)
+        log(f"  renamed {len(custom)} track(s) via {len(prof['globalus'])} globalus table(s) — ELF untouched, CRC preserved")
     else:
-        # >44, no cheats: bake the whole EA-TRAX expansion into the ISO's ELF. The metadata must live where
-        # the game won't clobber it, and the construct must be forced to use it (the game resets the baseptr
-        # global at runtime). Recipe (all baked, then CRC-neutralised so PCSX2 keeps the BEBF8793 graphics fixes).
+        # >44: bake the EA-TRAX expansion into the ISO's ELF. The metadata lives in the freed cave (the game
+        # reverts the baseptr global at runtime, so the construct is patched to force obj[0xB4]=CAVE). All
+        # baked, then CRC-neutralised so PCSX2 keeps the disc's graphics fixes.
         if not (cave_pnach and os.path.isfile(cave_pnach)):
-            raise RuntimeError("A +44 portable ISO needs the [ELF Code Cave] pnach "
-                               "(BEBF8793_elf_code_cave.pnach) — it frees the region the metadata lives in. "
-                               "Put it in your PCSX2 cheats folder (or build <=44 for a cheatless ISO).")
-        # NAMES: append romanized strings to globalus
-        gtmp = tempfile.mktemp(prefix="glob_", suffix=".bin")
-        open(gtmp, "wb").write(orig_glob)
-        if os.path.exists(gtmp + ".orig"): os.remove(gtmp + ".orig")
+            raise RuntimeError(f"A +44 portable ISO needs this disc's [ELF Code Cave] pnach "
+                               f"({os.path.basename(prof['cave_pnach'])}) — it frees the region the metadata "
+                               f"lives in. Expected (bundled) at: {cave_pnach}")
+        # NAMES: append the romanized strings to every (per-language) globalus table
         strings = []
         for g in custom:
             s = slots[g]
             strings += [ee.romanize(s.get("title", "")), ee.romanize(s.get("album", "")), ee.romanize(s.get("artist", ""))]
-        base_id = ee._rebuild_globalus(gtmp, strings, log)
-        new_glob = open(gtmp, "rb").read()
-        for p in (gtmp, gtmp + ".orig"):
-            if os.path.exists(p): os.remove(p)
-        relocate(buf, grec, new_glob, log)
-        # (a) bake the [ELF Code Cave] relocation -> frees 0x16B4F0 for the metadata array
+        base_id = None
+        for gpath in prof["globalus"]:
+            grec, glba, gsz = find_record(buf, gpath)
+            orig_glob = bytes(buf[glba * 2048:glba * 2048 + gsz])
+            gtmp = tempfile.mktemp(prefix="glob_", suffix=".bin")
+            open(gtmp, "wb").write(orig_glob)
+            if os.path.exists(gtmp + ".orig"): os.remove(gtmp + ".orig")
+            base_id = ee._rebuild_globalus(gtmp, strings, log)     # same count across langs -> same base_id
+            new_glob = open(gtmp, "rb").read()
+            for p in (gtmp, gtmp + ".orig"):
+                if os.path.exists(p): os.remove(p)
+            relocate(buf, grec, new_glob, log)
+        # (a) bake the [ELF Code Cave] relocation -> frees CAVE for the metadata array
         import re as _re, array, functools, operator
         nc = 0
         for line in open(cave_pnach):
@@ -228,21 +286,23 @@ def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None, cave
             if m:
                 struct.pack_into("<I", buf, eoff + ee._fo(int(m.group(1), 16) & 0x0FFFFFFF), int(m.group(2), 16)); nc += 1
         log(f"  baked {nc} [ELF Code Cave] patches (frees 0x{CAVE:X})")
-        # (b) digit hook
-        for vbase in ee.HOOK_VAS:
-            for k, wv in enumerate(ee.HOOK):
+        # (b) digit hook — the digit-table address is baked into the hook words per profile
+        hook = _hook_words(prof["digits_va"])
+        for vbase in prof["hook_vas"]:
+            for k, wv in enumerate(hook):
                 struct.pack_into("<I", buf, eoff + ee._fo(vbase + k * 4), wv)
-        # (c) digit chars 0..num_files-1 — must NOT reach DIGITS_VA+16 (the ".rws" string lives there)
+        # (c) digit chars 0..num_files-1 (NTSC: must not reach the ".rws" string; PAL: in the cave, no collision)
         num_files = (N - 1) // TRACKS_PER_FILE + 1
         n_words = (num_files + 1) // 2
         if n_words > 4:
             raise RuntimeError(f"{N} tracks needs {num_files} _eatrax files; the digit table caps at 8 files (176)")
         digs = b"".join(bytes([0x30 + d, 0]) for d in range(n_words * 2))
-        buf[eoff + ee._fo(ee.DIGITS_VA):eoff + ee._fo(ee.DIGITS_VA) + len(digs)] = digs
+        dv = prof["digits_va"]
+        buf[eoff + ee._fo(dv):eoff + ee._fo(dv) + len(digs)] = digs
         # (d) count + baseptr + metadata array @ CAVE
-        struct.pack_into("<I", buf, eoff + ee._fo(ee.COUNT_VA), N)
-        struct.pack_into("<I", buf, eoff + ee._fo(ee.BASEPTR_VA), CAVE)
-        orig = [list(struct.unpack_from("<IIIIII", buf, eoff + ee._fo(ee.META_VA + i * 24))) for i in range(44)]
+        struct.pack_into("<I", buf, eoff + ee._fo(prof["count_va"]), N)
+        struct.pack_into("<I", buf, eoff + ee._fo(prof["baseptr_va"]), CAVE)
+        orig = [list(struct.unpack_from("<IIIIII", buf, eoff + ee._fo(prof["meta_va"] + i * 24))) for i in range(44)]
         ci = 0
         for g in range(N):
             ent = eoff + ee._fo(CAVE) + g * 24
@@ -252,65 +312,61 @@ def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None, cave
             else:
                 e = orig[g]; struct.pack_into("<IIIIII", buf, ent, g, 0, e[2], e[3], e[4], 0x0F)
         # (e) patch the EA-TRAX construct so obj[0xB4]=CAVE (bypass the runtime-reverted baseptr global)
-        struct.pack_into("<I", buf, eoff + ee._fo(CONSTRUCT_LUI_VA), 0x3C020000 | (CAVE >> 16))      # lui $v0,hi
-        struct.pack_into("<I", buf, eoff + ee._fo(CONSTRUCT_ORI_VA), 0x34450000 | (CAVE & 0xFFFF))   # ori $a1,$v0,lo
+        struct.pack_into("<I", buf, eoff + ee._fo(prof["construct_lui"]), 0x3C020000 | (CAVE >> 16))    # lui $v0,hi
+        struct.pack_into("<I", buf, eoff + ee._fo(prof["construct_ori"]), 0x34450000 | (CAVE & 0xFFFF))  # ori $a1,$v0,lo
         log(f"  baked hook + count={N} + metadata @0x{CAVE:X} + construct patch (obj[0xB4]->CAVE)")
-        # (e2) PER-TRACK PLAY-LOCATION fixes for the EA TRAX list menu. Without these, >44 tracks CRASH on
-        # "set all + confirm", show infinite garbage past the last track, and the play-loc default varies.
-        # Root cause (see memory eatrax-menu-list-playloc): the list "control block" pointer is set to obj+104
-        # (by 0x3FC040), so its row-count ctrl[4] = obj[108] lives INSIDE the per-track play-ORDER array
-        # (obj[13+i], one byte/track). For count>91 the array overwrites obj[104..] -> garbage count + the
-        # confirm-crash (search loop overrun). All fixes are plain instruction rewrites (+ a PLOC byte-bake).
+        # (e2) PER-TRACK PLAY-LOCATION / anti-crash fixes. The EATRAX obj is laid out for 44 tracks: the per-track
+        # play-ORDER array at obj[13] (1 byte/track) OVERFLOWS, for >44 tracks, into the obj's other state — a
+        # word-array @obj[88] whose elements include obj[104]/obj[108] (the menu control block + its row count).
+        # The obj is built at INIT, so that clobber corrupts state at boot -> loading hang (and the menu crash /
+        # infinite list / gameplay crash on a music-change event). The clean root fix: relocate the ORDER ARRAY
+        # itself to a free gap in the obj (obj+0x208), so nothing else is touched. (See eatrax-menu-list-playloc.)
         def _patchw(va, word): struct.pack_into("<I", buf, eoff + ee._fo(va), word & 0xFFFFFFFF)
         def _getw(va): return struct.unpack_from("<I", buf, eoff + ee._fo(va))[0]
-        # The EATRAX object (@0x1E7A888) is laid out for 44 tracks: the per-track play-ORDER array at obj[13]
-        # (1 byte/track) OVERFLOWS, for >44 tracks, into the obj's other state — a word-array @obj[88] (whose
-        # elements include obj[104] & obj[108]) and the menu control-block @obj+104 (its row-count = obj[108]).
-        # Clobbering that state caused the menu confirm-crash, the infinite list, AND an in-game crash when an
-        # event (collision / song-end / race-end) re-reads the now-garbage state. Relocating individual fields
-        # only DESYNCS them (the word-array reaches the same bytes via obj[88+i*4]). The clean root fix:
-        # relocate the ORDER ARRAY itself out of the obj to a free BSS slot, so nothing else is touched.
-        ORDER_OFF = (0x1E7AA90 - 0x1E7A888) & 0xFFFF    # obj[13] -> 0x1E7AA90 (free gap right after the obj buffers)
-        for va in (0x3F3A0C,0x3FB8DC,0x3FB914,0x3FB968,0x3FB978,0x3FB97C,0x3FB980,    # all 13 obj[13] accessors
-                   0x3FBED0,0x3FBF7C,0x3FBFD0,0x3FBFE0,0x3FBFE4,0x3FBFE8):            # (init/shuffle/search/play)
+        for va in prof["order_accessors"]:                       # the 13 obj[13] accessors (init/shuffle/search/play)
             w = _getw(va); assert (w & 0xFFFF) == 13, f"0x{va:X} not an obj[13] accessor"
             _patchw(va, (w & 0xFFFF0000) | ORDER_OFF)
-        # PLOC (per-track play-loc setting array): the game's 0x4F5040 is BSS sized for 44; relocate every
-        # accessor to a cave-resident copy (PLOC, sized for N) and bake it to 0x0F (=ALL) — the cave is freed
-        # *code* (garbage) otherwise. form-B accessors load 0x4F5040 directly; form-A load 0x4EE040 then +0x7000.
-        PLOC = CAVE + 0x1160                                      # 0x16C650: after metadata+comp, in the free hole
-        def _reloc_addr(lui_va, lo_va, addr):                    # rewrite a lui/addiu address pair, keep regs
-            _patchw(lui_va, (_getw(lui_va) & 0xFFFF0000) | (((addr + 0x8000) >> 16) & 0xFFFF))
-            _patchw(lo_va,  (_getw(lo_va)  & 0xFFFF0000) | (addr & 0xFFFF))
-        for lui_va, lo_va in ((0x3FCA34,0x3FCA3C),(0x4218E0,0x4218E8),(0x421B2C,0x421B34),(0x45C198,0x45C1A0),(0x45C70C,0x45C714)):
-            _reloc_addr(lui_va, lo_va, PLOC)                     # form-B: base = PLOC
-        for lui_va, lo_va in ((0x3FCC2C,0x3FCC38),(0x431480,0x431484),(0x431524,0x43152C)):
-            _reloc_addr(lui_va, lo_va, PLOC - 0x7000)            # form-A: base+0x7000 = PLOC
-        for i in range(N): buf[eoff + ee._fo(PLOC) + i] = 0x0F  # bake PLOC = ALL
-        # 0x3FBB00 (list per-track metadata copy) reads ctrl[76] for the base, but the game reverts that to the
-        # 44-entry 0x4A5600 at runtime -> garbage metadata/play-loc for extras. Rework so a1 = CAVE + track*24
-        # (use the free delay-slot nop @0x3FBB10 to hold the CAVE base; route track*24 through $v1).
-        _patchw(0x3FBB10, 0x3C020000 | (CAVE >> 16))             # lui $v0,hi   (was nop)
-        _patchw(0x3FBB14, 0x00051840)                            # sll $v1,$a1,1
-        _patchw(0x3FBB1C, 0x00651821)                            # addu $v1,$v1,$a1
-        _patchw(0x3FBB20, 0x34420000 | (CAVE & 0xFFFF))          # ori $v0,$v0,lo  (was lw $v0,76($a2))
-        # navigation row-count = ctrl[4] = obj[108] (clobbered by the order array) -> hardcode both reads to N.
-        _patchw(0x431194, 0x24030000 | (N & 0xFFFF))             # li $v1,N  (render bound; was lw $v1,4($v1))
-        _patchw(0x431684, 0x24030000 | (N & 0xFFFF))             # li $v1,N  (down-nav bound)
-        log(f"  per-track fixes: order-array relocated(13) + PLOC reloc(16)+bake + metadata->CAVE + nav-count={N}")
-        # (f) CRC-NEUTRAL: keep the ELF XOR-CRC at 0xBEBF8793 so PCSX2 keeps Burnout 3's graphics fixes.
+        # The remaining NTSC menu patches (PLOC reloc + 0x3FBB00 metadata-base rework + nav-count hardcode) are
+        # NOT needed on PAL — relocating the order array alone keeps obj[88..108] intact there. Leaving PLOC
+        # alone also keeps the radio DJ playing. (See eatrax-dj-playloc-tradeoff.)
+        if prof["ploc"]:
+            p = prof["ploc"]
+            # PLOC (per-track play-loc setting array @0x4F5040, BSS sized for 44): relocate every accessor to a
+            # cave-resident copy sized for N and bake it 0x0F (=ALL). form-B accessors load 0x4F5040 directly;
+            # form-A load 0x4EE040 then +0x7000.
+            PLOC = CAVE + PLOC_CAVE_OFF
+            def _reloc_addr(lui_va, lo_va, addr):                # rewrite a lui/addiu address pair, keep regs
+                _patchw(lui_va, (_getw(lui_va) & 0xFFFF0000) | (((addr + 0x8000) >> 16) & 0xFFFF))
+                _patchw(lo_va,  (_getw(lo_va)  & 0xFFFF0000) | (addr & 0xFFFF))
+            for lui_va, lo_va in p["formB"]: _reloc_addr(lui_va, lo_va, PLOC)            # form-B: base = PLOC
+            for lui_va, lo_va in p["formA"]: _reloc_addr(lui_va, lo_va, PLOC - 0x7000)   # form-A: base+0x7000 = PLOC
+            for i in range(N): buf[eoff + ee._fo(PLOC) + i] = 0x0F                       # bake PLOC = ALL
+            # 0x3FBB00 (list per-track metadata copy) reads ctrl[76], reverted to the 44-entry table at runtime
+            # -> garbage for extras. Rework so a1 = CAVE + track*24.
+            bb = p["bb00"]
+            _patchw(bb[0], 0x3C020000 | (CAVE >> 16))            # lui $v0,hi   (was nop)
+            _patchw(bb[1], 0x00051840)                           # sll $v1,$a1,1
+            _patchw(bb[2], 0x00651821)                           # addu $v1,$v1,$a1
+            _patchw(bb[3], 0x34420000 | (CAVE & 0xFFFF))         # ori $v0,$v0,lo  (was lw $v0,76($a2))
+            for va in p["navcount"]:                             # nav row-count = obj[108] -> hardcode to N
+                _patchw(va, 0x24030000 | (N & 0xFFFF))           # li $v1,N
+            log(f"  per-track fixes: order-array(13) + PLOC reloc+bake + metadata->CAVE + nav-count={N}")
+        else:
+            log("  per-track fix: order-array(13) relocated (PAL needs no PLOC/nav-count — DJ stays on)")
+        # (f) CRC-NEUTRAL: keep the ELF XOR-CRC at the disc's value so PCSX2 keeps Burnout 3's graphics fixes.
         n4 = ssz - (ssz % 4)
         words = array.array("I"); words.frombytes(bytes(buf[eoff:eoff + n4]))   # host is little-endian (x86)
         cur = functools.reduce(operator.xor, words, 0) & 0xFFFFFFFF
         comp = eoff + ee._fo(CAVE) + N * 24 + 0x40                              # free word in the freed cave hole
         struct.pack_into("<I", buf, comp,
-                         struct.unpack_from("<I", buf, comp)[0] ^ (cur ^ 0xBEBF8793))
-        log(f"  CRC-neutral: ELF XOR-CRC {cur:08X} -> BEBF8793 (graphics fixes survive)")
+                         struct.unpack_from("<I", buf, comp)[0] ^ (cur ^ prof["crc"]))
+        log(f"  CRC-neutral: ELF XOR-CRC {cur:08X} -> {prof['crc']:08X} (graphics fixes survive)")
 
     if progress: progress("Writing ISO...")
     open(out_iso, "wb").write(buf)
     log(f"wrote {out_iso} ({len(buf)} bytes, {N} tracks, {len(custom)} custom)")
-    return {"out": out_iso, "custom": len(custom), "files": sorted(files), "size": len(buf), "count": N, "expansion": has_exp}
+    return {"out": out_iso, "custom": len(custom), "files": sorted(files), "size": len(buf), "count": N,
+            "expansion": has_exp, "disc": disc, "region": prof["region"]}
 
 if __name__ == "__main__":
     # CLI test (run as a module from the repo root):  python -m core.portable_iso clean.iso out.iso

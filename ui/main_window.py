@@ -385,7 +385,7 @@ class MainWindow(QMainWindow):
         i.setHtml("""<div style="font-family:monospace;color:#ccc;line-height:1.8">
         <h2 style="color:#ff4500">📖 Guide — v12.2</h2>
         <h3 style="color:#ff8c00">How to Use</h3>
-        <p style="color:#aaa">1. Drag your Burnout 3 ISO (NTSC-U, SLUS-21050) to the ISO tab<br>
+        <p style="color:#aaa">1. Drag your Burnout 3 ISO (NTSC-U SLUS-21050 or PAL SLES-52585) to the ISO tab — region auto-detected<br>
         2. Go to SOUNDTRACK — the 44 originals are pre-loaded. Replace any slot, or add new<br>
         &nbsp;&nbsp;&nbsp;ones (up to 176 total). Title/Artist/Album auto-fill + romanize from any language.<br>
         3. Click 💿 <b>BUILD PORTABLE ISO</b> — one self-contained disc, no cheats,<br>
@@ -418,7 +418,7 @@ class MainWindow(QMainWindow):
         Hard limit: <b>176 tracks</b> (8 files × 22) — the game's filename routing tops out there.</p>
         <h3 style="color:#ff8c00">ISO Structure</h3>
         <p style="color:#aaa"><code style="color:#69f0ae">
-        SLUS_210.50 → Executable (game CRC kept at BEBF8793)<br>
+        SLUS_210.50 / SLES_525.85 → Executable (game CRC preserved)<br>
         DATA/GLOBALUS.BIN → Song names (UTF-16)<br>
         <b>TRACKS/_EATRAX0..7.RWS → Music (22 tracks each)</b><br>
         TRACKS/[maps]/ → Track data<br>
