@@ -72,7 +72,7 @@ The C encoder (`psxadpcm.c`) auto-compiles on first run via `gcc`. If `gcc` is n
 
 ## 📖 How to Use
 
-1. **Load ISO** — Drag your Burnout 3: Takedown ISO (NTSC-U SLUS-21050 or PAL SLES-52585) to the ISO tab — the region is auto-detected
+1. **Load ISO** — Drag your Burnout 3: Takedown ISO (NTSC-U or PAL — SLUS-21050 / SLES-52585 / SLES-52584) to the ISO tab — the region is auto-detected
 2. **Assign Music** — Go to the **SOUNDTRACK** tab. The 44 originals are pre-loaded — replace any, or add new ones (up to 176 total). Title/Artist/Album auto-fill from metadata and auto-romanize.
 3. **Build** — Click **💿 BUILD PORTABLE ISO**
 4. **Play** — Load the resulting ISO in PCSX2, Android (AetherSX2/NetherSX2), or a real PS2 — everything is baked into the disc
@@ -154,16 +154,16 @@ Verified by byte-comparison against decoded/re-encoded original tracks.
 
 - **176-track ceiling** — The digit file-router and the `.rws` filename string cap the expansion at 8 `_EATRAX` files (8 × 22 = 176 tracks).
 - **4-bit audio is the format's ceiling** — PS-ADPCM is the PS2's native codec (32 kHz, ~4 bits/sample), the *same* as the original EA Trax tracks. The encoder is near-optimal for it, but extremely bright / high-pitched masters can still sound a bit grainy on the loudest highs — that's the format, not the encoder.
-- **NTSC-U & PAL (Fr/De/It)** — Auto-detects and supports the US version (SLUS-21050) *and* the PAL multi-language version (SLES-52585). NTSC-J and other PAL variants (e.g. SLES-52584) have different offsets and aren't profiled yet.
+- **NTSC-U & both PAL versions** — Auto-detects and supports NTSC-U (SLUS-21050) and **both** PAL multi-language releases: **SLES-52585** (Fr/De/It) and **SLES-52584** (En/Es/Nl/Sv). NTSC-J (SLPM-65719) has different offsets and isn't profiled yet.
 - **No CJK fonts** — The game's font doesn't include Japanese/Chinese/Korean glyphs, so names are auto-**romanized** to Latin/romaji (which the font renders) instead of showing as squares.
 
 ## 🤝 Contributing
 
 Contributions welcome! Areas that need help:
 
-- **NTSC-J / other PAL variants** — Adding the remaining regions (SLPM-65719 Japan, SLES-52584, …) via a new `DISC_PROFILES` entry in `core/portable_iso.py` (the offset-derivation recipe is the one used for PAL)
+- **NTSC-J support** — Adding the Japanese release (SLPM-65719) via a new `DISC_PROFILES` entry in `core/portable_iso.py` (same offset-derivation recipe used for the two PAL profiles)
 
-Already done: ✅ full-length songs, ✅ **up to 176 tracks baked into a self-contained ISO (no cheats)**, ✅ working per-track play-location for big playlists, ✅ unlimited romanized song names, ✅ near-optimal PS-ADPCM encoder, ✅ **NTSC-U + PAL (Fr/De/It) support (auto-detected)**.
+Already done: ✅ full-length songs, ✅ **up to 176 tracks baked into a self-contained ISO (no cheats)**, ✅ working per-track play-location for big playlists, ✅ unlimited romanized song names, ✅ near-optimal PS-ADPCM encoder, ✅ **NTSC-U + both PAL versions (Fr/De/It & En/Es/Nl/Sv), auto-detected**.
 
 ## 🙏 Credits & Acknowledgments
 

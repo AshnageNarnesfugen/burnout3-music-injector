@@ -385,7 +385,7 @@ class MainWindow(QMainWindow):
         i.setHtml("""<div style="font-family:monospace;color:#ccc;line-height:1.8">
         <h2 style="color:#ff4500">📖 Guide — v12.2</h2>
         <h3 style="color:#ff8c00">How to Use</h3>
-        <p style="color:#aaa">1. Drag your Burnout 3 ISO (NTSC-U SLUS-21050 or PAL SLES-52585) to the ISO tab — region auto-detected<br>
+        <p style="color:#aaa">1. Drag your Burnout 3 ISO (NTSC-U or PAL: SLUS-21050 / SLES-52585 / SLES-52584) to the ISO tab — region auto-detected<br>
         2. Go to SOUNDTRACK — the 44 originals are pre-loaded. Replace any slot, or add new<br>
         &nbsp;&nbsp;&nbsp;ones (up to 176 total). Title/Artist/Album auto-fill + romanize from any language.<br>
         3. Click 💿 <b>BUILD PORTABLE ISO</b> — one self-contained disc, no cheats,<br>

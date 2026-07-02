@@ -102,7 +102,19 @@ DISC_PROFILES = {
         "construct_lui": 0x3FD1E8, "construct_ori": 0x3FD1F0,
         "order_accessors": [0x3F3D7C, 0x3FBC60, 0x3FBC98, 0x3FBCEC, 0x3FBCFC, 0x3FBD00, 0x3FBD04,
                             0x3FC2F0, 0x3FC39C, 0x3FC3F0, 0x3FC400, 0x3FC404, 0x3FC408],
-        "ploc": None,   # PAL: the order-array relocation alone suffices (and keeps the DJ)
+        "ploc": None,   # PAL: the order-array relocation alone suffices
+    },
+    "SLES_525.84": {   # PAL (Europe/Australia, En/Es/Nl/Sv), game CRC 75BECC18. Sibling of 525.85:
+                       # same cave/DATA scheme, but the menu/construct CODE is shifted -0x10 and DATA +0x180.
+        "region": "PAL (En/Es/Nl/Sv)", "elf": "/SLES_525.84",
+        "globalus": ["/DATA/GLOBALEN.BIN", "/DATA/GLOBALSP.BIN", "/DATA/GLOBALDU.BIN", "/DATA/GLOBALSW.BIN"],
+        "crc": 0x75BECC18, "cave_pnach": os.path.join("research", "pal", "SLES-52584_elf_code_cave.pnach"),
+        "meta_va": 0x4A5A90, "count_va": 0x4A5EB4, "baseptr_va": 0x4A5EFC,
+        "hook_vas": [0x3FC0E0, 0x3FC79C], "digits_va": CAVE + 0x1800,
+        "construct_lui": 0x3FD1D8, "construct_ori": 0x3FD1E0,
+        "order_accessors": [0x3F3D6C, 0x3FBC50, 0x3FBC88, 0x3FBCDC, 0x3FBCEC, 0x3FBCF0, 0x3FBCF4,
+                            0x3FC2E0, 0x3FC38C, 0x3FC3E0, 0x3FC3F0, 0x3FC3F4, 0x3FC3F8],
+        "ploc": None,   # PAL: order-array relocation alone
     },
 }
 
