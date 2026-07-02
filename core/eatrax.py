@@ -96,33 +96,53 @@ def _build_eatrax_file(base, songs_by_local, tmp, log):
         out += a
     return bytes(out)
 
-# ---- GLOBALUS string-table relocation ----
+# ---- GLOBALUS string-table extension ----
 def _rebuild_globalus(path, new_strings, log):
-    """Append a bigger pointer table + the new strings; update header count/table_offset.
-    Idempotent: rebuilds from a pristine backup each call. Returns the first new string id."""
+    """Extend the pointer table IN PLACE (the strings that its growth would clobber are moved to
+    appended copies and their entries repointed); header count is bumped, table offset unchanged.
+
+    Why in place: the SLES-52584 engine reads the pointer table at its ORIGINAL position and
+    ignores the header's table offset (relocating the table showed mid-string garbage for every
+    new id in-game), while NTSC/SLES-52585 follow the header. Growing the table where it already
+    lives (with the header still pointing at it) satisfies both. Idempotent: rebuilds from a
+    pristine backup each call. Returns the first new string id."""
     backup = path + ".orig"
     if not os.path.exists(backup):
         shutil.copy2(path, backup)
     g = bytearray(open(backup, "rb").read())          # always start from pristine
     count = struct.unpack_from("<I", g, 8)[0]
     tbl = struct.unpack_from("<I", g, 0xC)[0]
-    new_tbl_off = (len(g) + 3) & ~3
+    tbl_end = tbl + count * 4
+    zone_end = tbl_end + len(new_strings) * 4         # the table's new footprint
+    def str_end(o):                                    # end of the UTF-16 string at o (incl. terminator)
+        e = o
+        while e < len(g) - 1 and not (g[e] == 0 and g[e + 1] == 0):
+            e += 2
+        return e + 2
+    append = bytearray()
+    if len(g) % 2:                                     # keep UTF-16 alignment for appended strings
+        append += b"\x00"
+    # 1) move every string whose data starts inside the new table footprint; repoint ALL entries
+    #    sharing that offset (strings can be aliased by several ids)
+    offs = [struct.unpack_from("<I", g, tbl + i * 4)[0] for i in range(count)]
+    moved = {}                                         # old offset -> new offset
+    for o in sorted({o for o in offs if tbl_end <= o < zone_end}):
+        moved[o] = len(g) + len(append)
+        append += g[o:str_end(o)]
+    for i, o in enumerate(offs):
+        if o in moved:
+            struct.pack_into("<I", g, tbl + i * 4, moved[o])
+    # 2) new table entries right after the old table, pointing at the appended new strings
+    for j, s in enumerate(new_strings):
+        struct.pack_into("<I", g, tbl_end + j * 4, len(g) + len(append))
+        append += s.encode("utf-16-le") + b"\x00\x00"
+    # 3) header: bump count; table offset stays where every engine already looks
     total = count + len(new_strings)
-    new_str_off = new_tbl_off + total * 4
-    blob = bytearray(); offs = []
-    for s in new_strings:
-        offs.append(new_str_off + len(blob))
-        blob += s.encode("utf-16-le") + b"\x00\x00"
-    table = bytearray()
-    for i in range(count):
-        table += struct.pack("<I", struct.unpack_from("<I", g, tbl + i * 4)[0])
-    for o in offs:
-        table += struct.pack("<I", o)
-    out = bytearray(g) + b"\x00" * (new_tbl_off - len(g)) + table + blob
-    struct.pack_into("<I", out, 8, total)             # count
-    struct.pack_into("<I", out, 0xC, new_tbl_off)     # table offset
+    struct.pack_into("<I", g, 8, total)
+    out = bytes(g) + bytes(append)
     open(path, "wb").write(out)
-    log(f"  globalus.bin rebuilt: +{len(new_strings)} strings (ids {count}..{total-1}), {len(out)} bytes")
+    log(f"  globalus extended in place: +{len(new_strings)} ids ({count}..{total-1}), "
+        f"{len(moved)} early strings moved, {len(out)} bytes")
     return count
 
 def globalus_overwrite(g_bytes, overrides, log=print):
