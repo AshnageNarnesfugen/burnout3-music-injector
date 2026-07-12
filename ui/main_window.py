@@ -134,11 +134,11 @@ class MainWindow(QMainWindow):
         </div>""")
         self.tabs.setCurrentIndex(1)
 
-    # ─── SOUNDTRACK tab — full soundtrack: replace any of 44 + add up to 176, then build a portable ISO ──
+    # ─── SOUNDTRACK tab — full soundtrack: replace any of 44 + add up to 220, then build a portable ISO ──
     def _build_soundtrack_tab(self):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(16,16,16,16); lay.setSpacing(10)
         note = QLabel("The 44 originals are pre-loaded — assign a song to a slot to replace it, or add new "
-                      "ones below (up to 176 total); untouched slots keep the original track. Names "
+                      "ones below (up to 220 total); untouched slots keep the original track. Names "
                       "auto-romanize from any language. Then BUILD PORTABLE ISO — one self-contained disc, "
                       "no cheats, nothing to download, that boots in PCSX2, Android (AetherSX2/NetherSX2) "
                       "and real PS2. Everything is baked into the ISO.")
@@ -173,7 +173,7 @@ class MainWindow(QMainWindow):
             if wd: self.exp_table.setColumnWidth(i,wd)
         lay.addWidget(self.exp_table, 1)
 
-        self.btn_build_iso = QPushButton("💿  BUILD PORTABLE ISO   —   up to 176 full-length tracks · no cheats · PCSX2 / Android / PS2")
+        self.btn_build_iso = QPushButton("💿  BUILD PORTABLE ISO   —   up to 220 full-length tracks · no cheats · PCSX2 / Android / PS2")
         self.btn_build_iso.setObjectName("primaryBtn"); self.btn_build_iso.setMinimumHeight(46)
         self.btn_build_iso.clicked.connect(self._st_build_portable)
         lay.addWidget(self.btn_build_iso)
@@ -299,10 +299,10 @@ class MainWindow(QMainWindow):
         custom = sum(1 for r in range(n)
                      if self.exp_table.item(r, 1) and self.exp_table.item(r, 1).data(Qt.ItemDataRole.UserRole))
         msg = f"{n} tracks · {custom} custom · {n - custom} original"
-        # Hard ceiling = 176 (8 _eatrax files x 22): beyond it the digit table would clobber the ".rws"
-        # string at 0x4CEA88. 45..66 is proven; 67..176 also routes fine but needs the audio-cap raise
-        # (RE-derived CAP_VAS patches) — works but flagged experimental until you boot-test your count.
-        HARD_MAX = 176
+        # Hard ceiling = 220 (10 _eatrax files x 22 — digit chars '0'..'9'). For >176 the digit table and
+        # PLOC move deeper into the code cave and the order array relocates to the big obj+0x318 gap
+        # (5.8KB, savestate-verified) — boot-tested up to 98; 99..220 is experimental until tested.
+        HARD_MAX = 220
         over_max = n > HARD_MAX
         if over_max:
             msg += f"  ⛔ {n} > {HARD_MAX} — past the file-routing limit (remove {n-HARD_MAX} to build)"
@@ -310,11 +310,11 @@ class MainWindow(QMainWindow):
         else:
             self.lbl_expcount.setStyleSheet("color:#ff8c00;font-weight:bold")
         self.lbl_expcount.setText(msg)
-        # The portable ISO handles the FULL range: ≤44 cheatless, 45..176 bakes the expansion into the ELF.
+        # The portable ISO handles the FULL range: ≤44 cheatless, 45..220 bakes the expansion into the ELF.
         if hasattr(self, "btn_build_iso"):
             self.btn_build_iso.setEnabled(not over_max)
             self.btn_build_iso.setToolTip(
-                f"Disabled: {n} > {HARD_MAX} tracks (8 _eatrax files x 22). Remove some." if over_max else "")
+                f"Disabled: {n} > {HARD_MAX} tracks (10 _eatrax files x 22). Remove some." if over_max else "")
 
     def _st_log_line(self, s):
         c = "#69f0ae" if s.startswith("✓") else "#ff5252" if s.startswith("✗") else "#aaa"
@@ -373,7 +373,7 @@ class MainWindow(QMainWindow):
 
     def _st_iso_done(self, ok, msg):
         self.btn_build_iso.setEnabled(True)
-        self.btn_build_iso.setText("💿  BUILD PORTABLE ISO   —   up to 176 full-length tracks · no cheats · PCSX2 / Android / PS2")
+        self.btn_build_iso.setText("💿  BUILD PORTABLE ISO   —   up to 220 full-length tracks · no cheats · PCSX2 / Android / PS2")
         if ok:
             QMessageBox.information(self, "Portable ISO built!", msg)
         else:
@@ -387,11 +387,11 @@ class MainWindow(QMainWindow):
         <h3 style="color:#ff8c00">How to Use</h3>
         <p style="color:#aaa">1. Drag your Burnout 3 ISO (NTSC-U or PAL: SLUS-21050 / SLES-52585 / SLES-52584) to the ISO tab — region auto-detected<br>
         2. Go to SOUNDTRACK — the 44 originals are pre-loaded. Replace any slot, or add new<br>
-        &nbsp;&nbsp;&nbsp;ones (up to 176 total). Title/Artist/Album auto-fill + romanize from any language.<br>
+        &nbsp;&nbsp;&nbsp;ones (up to 220 total). Title/Artist/Album auto-fill + romanize from any language.<br>
         3. Click 💿 <b>BUILD PORTABLE ISO</b> — one self-contained disc, no cheats,<br>
         &nbsp;&nbsp;&nbsp;nothing to download:<br>
         &nbsp;&nbsp;•&nbsp;≤44 tracks → ELF untouched, game CRC preserved<br>
-        &nbsp;&nbsp;•&nbsp;45–176 tracks → bakes the EA-TRAX expansion + the bundled code-cave into the ELF,<br>
+        &nbsp;&nbsp;•&nbsp;45–220 tracks → bakes the EA-TRAX expansion + the bundled code-cave into the ELF,<br>
         &nbsp;&nbsp;&nbsp;&nbsp;CRC-neutralised so graphics stay correct<br>
         4. Load the ISO in PCSX2 / AetherSX2 / NetherSX2 / real PS2 — everything is baked in.<br><br>
         Supported formats: MP3, M4A, FLAC, OGG, WAV, OPUS, WMA, AAC</p>

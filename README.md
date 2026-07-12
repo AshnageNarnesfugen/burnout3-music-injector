@@ -9,7 +9,7 @@
 
 Replace the EA Trax soundtrack with your own music. Supports MP3, FLAC, M4A, OGG, WAV, OPUS, and more. Features a full GUI with drag & drop, automatic PS-ADPCM encoding, surgical ISO patching, and custom song name display.
 
-**One self-contained portable ISO** — up to **176 full-length tracks** (no truncation) with **unlimited romanized names** and working **per-track play-location** (ALL / RACE / MENU / OFF), all baked into a single ISO that boots on **PCSX2, Android (AetherSX2/NetherSX2), and real PS2 — with zero cheats**.
+**One self-contained portable ISO** — up to **220 full-length tracks** (no truncation) with **unlimited romanized names** and working **per-track play-location** (ALL / RACE / MENU / OFF), all baked into a single ISO that boots on **PCSX2, Android (AetherSX2/NetherSX2), and real PS2 — with zero cheats**.
 
 ## 🎬 Demo
 
@@ -27,7 +27,7 @@ Replace the EA Trax soundtrack with your own music. Supports MP3, FLAC, M4A, OGG
 
 ## ✨ Features
 
-- **Up to 176 tracks** — Replace any or all of the 44 EA Trax songs *and* add new ones, all baked into one self-contained ISO (a digit=track/22 ELF hook + a relocated 24-byte metadata array in a code cave, CRC-neutralised so the game still boots and keeps its graphics fixes)
+- **Up to 220 tracks** — Replace any or all of the 44 EA Trax songs *and* add new ones, all baked into one self-contained ISO (a digit=track/22 ELF hook + a relocated 24-byte metadata array in a code cave, CRC-neutralised so the game still boots and keeps its graphics fixes)
 - **Full-length tracks** — A surgical ISO builder relocates the enlarged EATRAX/GLOBALUS files to the disc end (every other file stays byte-identical at its original LBA), so songs play at full length with **no cheats** — the ISO boots anywhere
 - **Per-track play-location** — Set each track's **ALL / RACE / MENU / OFF** in the in-game EA Trax menu — works for every track, not just the original 44 (the menu object was extended via reverse engineering so big playlists don't crash or garble)
 - **Unlimited romanized names** — Relocated GLOBALUS string table removes the per-field length limit; a built-in romanizer (ICU `Any-Latin; Latin-ASCII` + pykakasi for Japanese) converts foreign-script titles to readable Latin/romaji automatically
@@ -73,17 +73,17 @@ The C encoder (`psxadpcm.c`) auto-compiles on first run via `gcc`. If `gcc` is n
 ## 📖 How to Use
 
 1. **Load ISO** — Drag your Burnout 3: Takedown ISO (NTSC-U or PAL — SLUS-21050 / SLES-52585 / SLES-52584) to the ISO tab — the region is auto-detected
-2. **Assign Music** — Go to the **SOUNDTRACK** tab. The 44 originals are pre-loaded — replace any, or add new ones (up to 176 total). Title/Artist/Album auto-fill from metadata and auto-romanize.
+2. **Assign Music** — Go to the **SOUNDTRACK** tab. The 44 originals are pre-loaded — replace any, or add new ones (up to 220 total). Title/Artist/Album auto-fill from metadata and auto-romanize.
 3. **Build** — Click **💿 BUILD PORTABLE ISO**
 4. **Play** — Load the resulting ISO in PCSX2, Android (AetherSX2/NetherSX2), or a real PS2 — everything is baked into the disc
 
 ## 🎶 How It Builds
 
-Everything lives in the single **`🎶 SOUNDTRACK`** tab (pre-loads the 44 originals; replace any, add up to 176), with one build button:
+Everything lives in the single **`🎶 SOUNDTRACK`** tab (pre-loads the 44 originals; replace any, add up to 220), with one build button:
 
 | Build button | Tracks | Length | Names | Per-track play-loc | Cheats? | Runs on |
 |------|--------|--------|-------|------|------|------|
-| 💿 **BUILD PORTABLE ISO** | **1–176** | **full** | **unlimited (romanized)** | ✅ | **none** | PCSX2 / Android / PS2 |
+| 💿 **BUILD PORTABLE ISO** | **1–220** | **full** | **unlimited (romanized)** | ✅ | **none** | PCSX2 / Android / PS2 |
 
 > **How?** Burnout 3 reads its loose disc files by **fixed LBA**, so a normal ISO rebuild black-screens. The builder works around this surgically: it keeps every original file byte-identical at its LBA and relocates only the (enlarged) path-opened EATRAX/GLOBALUS files to the disc end. For **>44 tracks** it also bakes the whole EA-TRAX expansion (a digit ELF hook + a relocated metadata array in a freed code cave + the per-track play-location fixes) straight into the ELF, then **XOR-compensates so the game CRC stays `0xBEBF8793`** — so PCSX2 keeps Burnout 3's graphics fixes and the disc still boots. No cheats, nothing to download. See [`BURNOUT3_EATRAX_HANDOFF.md`](BURNOUT3_EATRAX_HANDOFF.md) for the reverse-engineering write-up.
 
@@ -105,7 +105,7 @@ Everything lives in the single **`🎶 SOUNDTRACK`** tab (pre-loads the 44 origi
 
 ## 📊 Tracks & Files
 
-Tracks are grouped **22 per file**: `_EATRAX0.RWS` = 1–22, `_EATRAX1.RWS` = 23–44, then `_EATRAX2 / 3 / 4 …` for tracks 45+ — up to **8 files = 176 tracks** (the digit router + the `.rws` filename string cap it there).
+Tracks are grouped **22 per file**: `_EATRAX0.RWS` = 1–22, `_EATRAX1.RWS` = 23–44, then `_EATRAX2 / 3 / 4 …` for tracks 45+ — up to **10 files = 220 tracks** (the digit characters '0'–'9' cap the file router there).
 
 - Every file is rebuilt at the **full length** of its songs — no truncation, no fade-out.
 - The enlarged files are relocated to the disc end, so the only cost of more (or longer) songs is a **bigger ISO** — never a silenced or cut song.
@@ -114,13 +114,13 @@ Tracks are grouped **22 per file**: `_EATRAX0.RWS` = 1–22, `_EATRAX1.RWS` = 23
 
 Custom names (Title / Album / Artist) are written into `DATA/GLOBALUS.BIN` inside the ISO:
 
-- **No length limit** — the tool **relocates the string-pointer table to a larger buffer appended at the file end** and repoints each name there, so the old fixed-size slots (and their truncation) are gone. Names can be any length.
+- **No length limit** — the tool **extends the string-pointer table in place** (new entries right after the original table, with the few displaced strings moved to the file end and repointed), so the old fixed-size slots (and their truncation) are gone. Names can be any length.
 - **Encoding**: UTF-16LE. Latin characters render perfectly. The NTSC-U font has **no CJK glyphs**, so Japanese/Chinese/Korean titles are **auto-romanized** (ICU `Any-Latin; Latin-ASCII` + pykakasi for Japanese) to readable Latin/romaji instead of showing as squares.
 
 ## 🔬 Technical Notes
 
 ### RWS Container Format
-The music is stored in `TRACKS/_EATRAX0.RWS` (tracks 1-22) and `TRACKS/_EATRAX1.RWS` (tracks 23-44) inside the ISO; tracks 45+ go in newly-added `_EATRAX2/3/4…` files (up to 8).
+The music is stored in `TRACKS/_EATRAX0.RWS` (tracks 1-22) and `TRACKS/_EATRAX1.RWS` (tracks 23-44) inside the ISO; tracks 45+ go in newly-added `_EATRAX2/3/4…` files (up to 10).
 
 ```
 RWS Container (0x080D) {
@@ -152,7 +152,7 @@ Verified by byte-comparison against decoded/re-encoded original tracks.
 
 ## 📋 Known Limitations
 
-- **176-track ceiling** — The digit file-router and the `.rws` filename string cap the expansion at 8 `_EATRAX` files (8 × 22 = 176 tracks).
+- **220-track ceiling** — The single-character file router caps the expansion at 10 `_EATRAX` files (10 × 22 = 220 tracks, digit characters '0'–'9').
 - **4-bit audio is the format's ceiling** — PS-ADPCM is the PS2's native codec (32 kHz, ~4 bits/sample), the *same* as the original EA Trax tracks. The encoder is near-optimal for it, but extremely bright / high-pitched masters can still sound a bit grainy on the loudest highs — that's the format, not the encoder.
 - **NTSC-U & both PAL versions** — Auto-detects and supports NTSC-U (SLUS-21050) and **both** PAL multi-language releases: **SLES-52585** (Fr/De/It) and **SLES-52584** (En/Es/Nl/Sv). NTSC-J (SLPM-65719) has different offsets and isn't profiled yet.
 - **No CJK fonts** — The game's font doesn't include Japanese/Chinese/Korean glyphs, so names are auto-**romanized** to Latin/romaji (which the font renders) instead of showing as squares.
@@ -163,7 +163,7 @@ Contributions welcome! Areas that need help:
 
 - **NTSC-J support** — Adding the Japanese release (SLPM-65719) via a new `DISC_PROFILES` entry in `core/portable_iso.py` (same offset-derivation recipe used for the two PAL profiles)
 
-Already done: ✅ full-length songs, ✅ **up to 176 tracks baked into a self-contained ISO (no cheats)**, ✅ working per-track play-location for big playlists, ✅ unlimited romanized song names, ✅ near-optimal PS-ADPCM encoder, ✅ **NTSC-U + both PAL versions (Fr/De/It & En/Es/Nl/Sv), auto-detected**.
+Already done: ✅ full-length songs, ✅ **up to 220 tracks baked into a self-contained ISO (no cheats)**, ✅ working per-track play-location for big playlists, ✅ unlimited romanized song names, ✅ near-optimal PS-ADPCM encoder, ✅ **NTSC-U + both PAL versions (Fr/De/It & En/Es/Nl/Sv), auto-detected**.
 
 ## 🙏 Credits & Acknowledgments
 

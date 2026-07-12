@@ -66,9 +66,18 @@ def relocate(buf, rec_off, new_data, log=print):
     return new_lba
 
 TRACKS_PER_FILE = 22
+MAX_FILES = 10             # digit chars '0'..'9' -> 10 _EATRAX files -> hard ceiling 220 tracks
 CAVE = 0x0016B4F0          # Nahelam code cave (frees ~188KB at the SAME VA on NTSC and PAL); metadata lives here.
-ORDER_OFF = 0x208          # relocate the per-track play-ORDER array obj[13] -> obj+0x208 (a free gap in the obj)
-PLOC_CAVE_OFF = 0x1160     # NTSC PLOC copy lives at CAVE+0x1160
+# Per-track play-ORDER array relocation target (obj[13] overflows the obj for >44 tracks). Two verified-free
+# gaps in the EATRAX obj (mapped via PCSX2 savestates, identical in stock & expanded builds):
+#   obj+0x208..0x2CA (194 B)  -> fits <=176 tracks (the long-proven target; kept byte-identical)
+#   obj+0x318..0x19FA (5.8 KB) -> used for >176 tracks (live game data sits at obj+0x2CA..0x318)
+ORDER_OFF = 0x208
+ORDER_OFF_BIG = 0x318
+PLOC_CAVE_OFF = 0x1160     # PLOC copy at CAVE+0x1160 (<=176; metadata N*24+comp stays below it)
+PLOC_CAVE_OFF_BIG = 0x2000 # >176: metadata grows past 0x1160, so PLOC moves up (220*24+0x40 = 0x14E0 < 0x2000)
+DIGITS_CAVE_OFF_BIG = 0x2800  # >176: digit table in the cave on ALL profiles (NTSC's 0x4CEA78 fits only 8 chars)
+NUMSTUB_CAVE_OFF = 0x3000  # >99: the track-number formatter stub lives at CAVE+0x3000 (see _numstub_words)
 
 # ─── Per-disc expansion profiles ─────────────────────────────────────────
 # The EATRAX construct copies the global baseptr into obj[0xB4]; the game RESETS that global at runtime, so
@@ -92,6 +101,10 @@ DISC_PROFILES = {
             "bb00": (0x3FBB10, 0x3FBB14, 0x3FBB1C, 0x3FBB20),
             "navcount": [0x431194, 0x431684],
         },
+        # >99 track-number display fix: the list renderer's jal to the int->UTF16 converter, the converter,
+        # and the empty-row clear path's row*6 computation (sll,addu,sll) that must become row*8
+        "render_num_jal": 0x4311BC, "num_converter": 0x2137F0,
+        "render_num_clear": (0x43136C, 0x431374, 0x43137C), "num_stub_regs": (17, 18),   # s1=row, s2=widget
     },
     "SLES_525.85": {   # PAL (Europe, Fr/De/It), game CRC CE49B0DE
         "region": "PAL (Fr/De/It)", "elf": "/SLES_525.85",
@@ -103,6 +116,9 @@ DISC_PROFILES = {
         "order_accessors": [0x3F3D7C, 0x3FBC60, 0x3FBC98, 0x3FBCEC, 0x3FBCFC, 0x3FBD00, 0x3FBD04,
                             0x3FC2F0, 0x3FC39C, 0x3FC3F0, 0x3FC400, 0x3FC404, 0x3FC408],
         "ploc": None,   # PAL: the order-array relocation alone suffices
+        # >99 number fix (derived by signature; row=s2, widget=s3 on PAL — untested in-game on PAL)
+        "render_num_jal": 0x4315FC, "num_converter": 0x2137F0,
+        "render_num_clear": (0x4317CC, 0x4317D4, 0x4317DC), "num_stub_regs": (18, 19),
     },
     "SLES_525.84": {   # PAL (Europe/Australia, En/Es/Nl/Sv), game CRC 75BECC18. Sibling of 525.85:
                        # same cave/DATA scheme, but the menu/construct CODE is shifted -0x10 and DATA +0x180.
@@ -115,6 +131,9 @@ DISC_PROFILES = {
         "order_accessors": [0x3F3D6C, 0x3FBC50, 0x3FBC88, 0x3FBCDC, 0x3FBCEC, 0x3FBCF0, 0x3FBCF4,
                             0x3FC2E0, 0x3FC38C, 0x3FC3E0, 0x3FC3F0, 0x3FC3F4, 0x3FC3F8],
         "ploc": None,   # PAL: order-array relocation alone
+        # >99 number fix (derived by signature; row=s2, widget=s3 on PAL — untested in-game on PAL)
+        "render_num_jal": 0x4315EC, "num_converter": 0x2137E0,
+        "render_num_clear": (0x4317BC, 0x4317C4, 0x4317CC), "num_stub_regs": (18, 19),
     },
 }
 
@@ -224,6 +243,10 @@ def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None, cave
         files.setdefault(g // TRACKS_PER_FILE, {})[g % TRACKS_PER_FILE] = slots[g]["song"]
     tmp = tempfile.mkdtemp(prefix="piso_")
     try:
+        # snapshot the CLEAN _EATRAX1 as the template for new files BEFORE anything is rebuilt —
+        # the rebuilt file's track sizes can fall outside _find_table's plausibility window
+        _, l1, s1 = find_record(buf, "/TRACKS/_EATRAX1.RWS")
+        template1 = bytes(buf[l1 * 2048:l1 * 2048 + s1])
         for f in sorted(files):                          # existing files 0/1: rebuild full-length + relocate
             if f >= 2: continue
             if progress: progress(f"Encoding _EATRAX{f}.RWS...")
@@ -231,12 +254,10 @@ def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None, cave
             base = bytes(buf[lba * 2048:lba * 2048 + sz])
             log(f"_EATRAX{f}.RWS: base {sz} B, replacing locals {sorted(files[f])}")
             relocate(buf, rec, ee._build_eatrax_file(base, files[f], tmp, log), log)
-        for f in sorted(files):                          # new files >=2: build from _EATRAX1 template + add record
+        for f in sorted(files):                          # new files >=2: build from the clean template + add record
             if f < 2: continue
             if progress: progress(f"Encoding _EATRAX{f}.RWS (new)...")
-            _, l1, s1 = find_record(buf, "/TRACKS/_EATRAX1.RWS")
-            base1 = bytes(buf[l1 * 2048:l1 * 2048 + s1])
-            new = ee._build_eatrax_file(base1, files[f], tmp, log)
+            new = ee._build_eatrax_file(template1, files[f], tmp, log)
             lba = append_data(buf, new)
             add_dir_record(buf, "/TRACKS", f"_EATRAX{f}.RWS;1", lba, len(new), log)
     finally:
@@ -298,18 +319,21 @@ def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None, cave
             if m:
                 struct.pack_into("<I", buf, eoff + ee._fo(int(m.group(1), 16) & 0x0FFFFFFF), int(m.group(2), 16)); nc += 1
         log(f"  baked {nc} [ELF Code Cave] patches (frees 0x{CAVE:X})")
-        # (b) digit hook — the digit-table address is baked into the hook words per profile
-        hook = _hook_words(prof["digits_va"])
+        # (b) digit hook — the digit-table address is baked into the hook words. For >176 tracks the digit
+        # table moves into the cave on EVERY profile (NTSC's native 0x4CEA78 spot fits only 8 chars before
+        # clobbering the ".rws" string); <=176 keeps each profile's proven location.
+        num_files = (N - 1) // TRACKS_PER_FILE + 1
+        if num_files > MAX_FILES:
+            raise RuntimeError(f"{N} tracks needs {num_files} _eatrax files; the digit routing caps at "
+                               f"{MAX_FILES} files ({MAX_FILES * TRACKS_PER_FILE} tracks)")
+        dv = (CAVE + DIGITS_CAVE_OFF_BIG) if N > 176 else prof["digits_va"]
+        hook = _hook_words(dv)
         for vbase in prof["hook_vas"]:
             for k, wv in enumerate(hook):
                 struct.pack_into("<I", buf, eoff + ee._fo(vbase + k * 4), wv)
-        # (c) digit chars 0..num_files-1 (NTSC: must not reach the ".rws" string; PAL: in the cave, no collision)
-        num_files = (N - 1) // TRACKS_PER_FILE + 1
+        # (c) digit chars 0..num_files-1
         n_words = (num_files + 1) // 2
-        if n_words > 4:
-            raise RuntimeError(f"{N} tracks needs {num_files} _eatrax files; the digit table caps at 8 files (176)")
         digs = b"".join(bytes([0x30 + d, 0]) for d in range(n_words * 2))
-        dv = prof["digits_va"]
         buf[eoff + ee._fo(dv):eoff + ee._fo(dv) + len(digs)] = digs
         # (d) count + baseptr + metadata array @ CAVE
         struct.pack_into("<I", buf, eoff + ee._fo(prof["count_va"]), N)
@@ -335,9 +359,10 @@ def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None, cave
         # itself to a free gap in the obj (obj+0x208), so nothing else is touched. (See eatrax-menu-list-playloc.)
         def _patchw(va, word): struct.pack_into("<I", buf, eoff + ee._fo(va), word & 0xFFFFFFFF)
         def _getw(va): return struct.unpack_from("<I", buf, eoff + ee._fo(va))[0]
+        order_off = ORDER_OFF_BIG if N > 176 else ORDER_OFF      # the 0x208 gap only holds 194 bytes
         for va in prof["order_accessors"]:                       # the 13 obj[13] accessors (init/shuffle/search/play)
             w = _getw(va); assert (w & 0xFFFF) == 13, f"0x{va:X} not an obj[13] accessor"
-            _patchw(va, (w & 0xFFFF0000) | ORDER_OFF)
+            _patchw(va, (w & 0xFFFF0000) | order_off)
         # The remaining NTSC menu patches (PLOC reloc + 0x3FBB00 metadata-base rework + nav-count hardcode) are
         # NOT needed on PAL — relocating the order array alone keeps obj[88..108] intact there. Leaving PLOC
         # alone also keeps the radio DJ playing. (See eatrax-dj-playloc-tradeoff.)
@@ -346,7 +371,7 @@ def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None, cave
             # PLOC (per-track play-loc setting array @0x4F5040, BSS sized for 44): relocate every accessor to a
             # cave-resident copy sized for N and bake it 0x0F (=ALL). form-B accessors load 0x4F5040 directly;
             # form-A load 0x4EE040 then +0x7000.
-            PLOC = CAVE + PLOC_CAVE_OFF
+            PLOC = CAVE + (PLOC_CAVE_OFF_BIG if N > 176 else PLOC_CAVE_OFF)
             def _reloc_addr(lui_va, lo_va, addr):                # rewrite a lui/addiu address pair, keep regs
                 _patchw(lui_va, (_getw(lui_va) & 0xFFFF0000) | (((addr + 0x8000) >> 16) & 0xFFFF))
                 _patchw(lo_va,  (_getw(lo_va)  & 0xFFFF0000) | (addr & 0xFFFF))
@@ -364,7 +389,44 @@ def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None, cave
                 _patchw(va, 0x24030000 | (N & 0xFFFF))           # li $v1,N
             log(f"  per-track fixes: order-array(13) + PLOC reloc+bake + metadata->CAVE + nav-count={N}")
         else:
-            log("  per-track fix: order-array(13) relocated (PAL needs no PLOC/nav-count — DJ stays on)")
+            log("  per-track fix: order-array(13) relocated (PAL needs no PLOC/nav-count)")
+        # (e3) >99 TRACK-NUMBER DISPLAY fix. The list widget stores each visible row's number in a
+        # 3-UTF16-char buffer (widget+4+row*6): 3-digit numbers leave no room for the terminator, so
+        # the null lands in the neighbour buffer and gets overwritten -> numbers render run-on
+        # ("100101"). Fix: a cave stub replaces the renderer's jal to the int->UTF16 converter; it
+        # computes a stride-8 buffer (widget+4+row*8, "220\0" fits), keeps the on-screen text element
+        # pointing at it (rewrites element[row].string_ptr at widget+0x68+row*0x50 every fill), and
+        # tail-jumps to the converter. RAM-mapped via savestates; see memory eatrax-menu-list-playloc.
+        if N > 99 and prof.get("render_num_jal"):
+            stub_va = CAVE + NUMSTUB_CAVE_OFF
+            conv = prof["num_converter"]
+            row, wid = prof["num_stub_regs"]                  # (visible-row reg, widget reg) at the jal site
+            stub = [
+                (row << 16) | (2 << 11) | (3 << 6),           # sll  v0,row,3     ; row*8
+                (wid << 21) | (2 << 16) | (2 << 11) | 0x21,   # addu v0,wid,v0
+                0x24440004,                                   # addiu a0,v0,4     ; a0 = widget+4+row*8
+                (row << 16) | (3 << 11) | (4 << 6),           # sll  v1,row,4
+                (row << 16) | (1 << 11) | (6 << 6),           # sll  at,row,6
+                0x00611821,                                   # addu v1,v1,at     ; row*80
+                (wid << 21) | (3 << 16) | (3 << 11) | 0x21,   # addu v1,wid,v1
+                0xAC640068,                                   # sw   a0,0x68(v1)  ; element.string_ptr = a0
+                0x08000000 | ((conv >> 2) & 0x3FFFFFF),       # j    converter (tail-call, ra intact)
+                0x00000000,                                   # nop (delay)
+            ]
+            for k, wv in enumerate(stub):
+                _patchw(stub_va + k * 4, wv)
+            _patchw(prof["render_num_jal"], 0x0C000000 | ((stub_va >> 2) & 0x3FFFFFF))
+            # the empty-row CLEAR path nulls the number buffer with the old row*6 stride — make it row*8
+            # (sll rX,s1,1 ; addu ; sll rX,rX,1  ->  sll rX,s1,3 ; nop ; nop), else the null truncates the
+            # neighbour ("220"->"22") and the phantom last row shows a stale number
+            c_sll1, c_addu, c_sll2 = prof["render_num_clear"]
+            w1 = _getw(c_sll1)
+            assert (w1 & 0xFC00003F) == 0 and ((w1 >> 6) & 31) == 1, f"0x{c_sll1:X} not a sll<<1"
+            _patchw(c_sll1, (w1 & ~0x7C0) | (3 << 6))     # same regs, shift 1 -> 3
+            _patchw(c_addu, 0); _patchw(c_sll2, 0)        # drop the *3 and the second <<1
+            log(f"  >99 number fix: renderer jal -> stub @0x{stub_va:X} + empty-row clear restrided")
+        elif N > 99:
+            log("  ⚠ >99 tracks on this disc profile: 3-digit list numbers will render run-on (fix not derived)")
         # (f) CRC-NEUTRAL: keep the ELF XOR-CRC at the disc's value so PCSX2 keeps Burnout 3's graphics fixes.
         n4 = ssz - (ssz % 4)
         words = array.array("I"); words.frombytes(bytes(buf[eoff:eoff + n4]))   # host is little-endian (x86)
