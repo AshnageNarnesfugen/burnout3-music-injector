@@ -78,6 +78,18 @@ PLOC_CAVE_OFF = 0x1160     # PLOC copy at CAVE+0x1160 (<=176; metadata N*24+comp
 PLOC_CAVE_OFF_BIG = 0x2000 # >176: metadata grows past 0x1160, so PLOC moves up (220*24+0x40 = 0x14E0 < 0x2000)
 DIGITS_CAVE_OFF_BIG = 0x2800  # >176: digit table in the cave on ALL profiles (NTSC's 0x4CEA78 fits only 8 chars)
 NUMSTUB_CAVE_OFF = 0x3000  # >99: the track-number formatter stub lives at CAVE+0x3000 (see _numstub_words)
+METASYNC_CAVE_OFF = 0x3200 # NTSC >44: after the profile load, re-sync each cave metadata word5 from the loaded
+                           # PLOC so the menu's metadata->PLOC rebuild doesn't clobber restored play-loc settings.
+# NTSC >44 SAVE EXTENSION (persist tracks 45..N): the memory-card profile blob is fully packed + 32-bit-sum
+# checksummed, but the 1180-byte career "slot" record has a reserved window (offset 721..896) that no code
+# accesses (verified in Ghidra: max direct ref = ofs 720) and that is zero in every slot. The >44 play-locs are
+# NIBBLE-PACKED (2/byte -> 88 B) there, behind a version marker, written just before the serialize checksum loop
+# (so the global checksum stays valid) and restored right after the play-loc load.
+SERSTUB_CAVE_OFF = 0x3400  # serialize hook stub: pack cave PLOC[44..N-1] -> savebuf slot-reserved window
+DESSTUB_CAVE_OFF = 0x3500  # deserialize hook stub: unpack it back into cave PLOC[44..N-1]
+SAVE_EXTRAS_MAGIC_OFF = 0xE664  # savebuf offset of the 4-byte version marker (slot0 reserved window)
+SAVE_EXTRAS_DATA_OFF  = 0xE668  # savebuf offset of the 88 packed bytes (ofs 728..816, inside 721..896)
+SAVE_EXTRAS_MAGIC = 0xB3B3B3B3
 
 # ─── Per-disc expansion profiles ─────────────────────────────────────────
 # The EATRAX construct copies the global baseptr into obj[0xB4]; the game RESETS that global at runtime, so
@@ -100,6 +112,13 @@ DISC_PROFILES = {
             "formA": [(0x3FCC2C, 0x3FCC38), (0x431480, 0x431484), (0x431524, 0x43152C)],
             "bb00": (0x3FBB10, 0x3FBB14, 0x3FBB1C, 0x3FBB20),
             "navcount": [0x431194, 0x431684],
+            # persistence: the profile-load caller applies the loaded radio struct via two calls; hijack the 2nd
+            # (jal 0x21B4E0) to first re-sync the cave metadata from the loaded PLOC, then tail-call the original.
+            "load_sync_hook": 0x421034, "load_sync_tail": 0x21B4E0,
+            # >44 save extension: hijack the serialize just before its checksum loop (was `addiu a1,s3,28`) and the
+            # deserialize just after the 44-entry play-loc load (was `lbu t2,44(v0)`) to pack/unpack the extras.
+            "save_ser_hook": 0x421CCC, "save_ser_tail": 0x421CD4, "save_ser_orig": 0x2665001C,  # addiu a1,s3,28
+            "save_des_hook": 0x421914, "save_des_tail": 0x42191C, "save_des_orig": 0x904A002C,  # lbu t2,44(v0)
         },
         # >99 track-number display fix: the list renderer's jal to the int->UTF16 converter, the converter,
         # and the empty-row clear path's row*6 computation (sll,addu,sll) that must become row*8
@@ -387,7 +406,97 @@ def build_portable_iso(clean_iso, out_iso, slots, log=print, progress=None, cave
             _patchw(bb[3], 0x34420000 | (CAVE & 0xFFFF))         # ori $v0,$v0,lo  (was lw $v0,76($a2))
             for va in p["navcount"]:                             # nav row-count = obj[108] -> hardcode to N
                 _patchw(va, 0x24030000 | (N & 0xFFFF))           # li $v1,N
-            log(f"  per-track fixes: order-array(13) + PLOC reloc+bake + metadata->CAVE + nav-count={N}")
+            # PERSISTENCE FIX: the menu rebuilds PLOC from the cave metadata word5 (via 0x3FBB00) every time it
+            # opens; that metadata is baked 0x0F and the profile load restores only PLOC (not the metadata), so
+            # restored play-loc settings were clobbered back to ALL on the next menu open. Fix: right after the
+            # load applies the radio struct, run a cave stub that re-syncs each metadata word5 low nibble from the
+            # just-loaded PLOC, then tail-calls the original apply. (User-verified: settings now persist.)
+            hook = p.get("load_sync_hook")
+            if hook:
+                stub = CAVE + METASYNC_CAVE_OFF; tail = p["load_sync_tail"]; metaw5 = CAVE + 20
+                Z, AT, T0, T1, T2, T4, T5 = 0, 1, 8, 9, 10, 12, 13
+                def _hi(a): return (a + 0x8000) >> 16
+                words = [
+                    0x24000000 | (Z<<21)  | (T0<<16) | (N & 0xFFFF),         # addiu t0,zero,N     (loop count)
+                    0x3C000000 | (T1<<16) | (_hi(PLOC) & 0xFFFF),            # lui   t1,hi(PLOC)
+                    0x24000000 | (T1<<21) | (T1<<16) | (PLOC & 0xFFFF),      # addiu t1,t1,lo      (t1=&PLOC[0])
+                    0x3C000000 | (T2<<16) | (_hi(metaw5) & 0xFFFF),          # lui   t2,hi(metaw5)
+                    0x24000000 | (T2<<21) | (T2<<16) | (metaw5 & 0xFFFF),    # addiu t2,t2,lo      (t2=&meta[0].w5)
+                    0x24000000 | (Z<<21)  | (AT<<16) | 0xFFF0,               # addiu at,zero,-16   (mask ~0xF)
+                    0x90000000 | (T1<<21) | (T4<<16),                        # lbu   t4,0(t1)      loop: PLOC[i]
+                    0x8C000000 | (T2<<21) | (T5<<16),                        # lw    t5,0(t2)      meta.w5
+                    0x30000000 | (T4<<21) | (T4<<16) | 0x000F,               # andi  t4,t4,0xF
+                    (T5<<21) | (AT<<16) | (T5<<11) | 0x24,                   # and   t5,t5,at
+                    (T5<<21) | (T4<<16) | (T5<<11) | 0x25,                   # or    t5,t5,t4
+                    0xAC000000 | (T2<<21) | (T5<<16),                        # sw    t5,0(t2)
+                    0x24000000 | (T0<<21) | (T0<<16) | 0xFFFF,               # addiu t0,t0,-1
+                    0x24000000 | (T1<<21) | (T1<<16) | 1,                    # addiu t1,t1,1
+                    0x14000000 | (T0<<21) | (Z<<16)  | 0xFFF7,               # bne   t0,zero,loop  (-9)
+                    0x24000000 | (T2<<21) | (T2<<16) | 24,                   # addiu t2,t2,24      (delay slot)
+                    0x08000000 | ((tail >> 2) & 0x3FFFFFF),                  # j     0x21B4E0      (tail, a0 intact)
+                    0x00000000,                                             # nop
+                ]
+                for k, wv in enumerate(words): _patchw(stub + k * 4, wv)
+                orig = _getw(hook)
+                assert orig == (0x0C000000 | ((tail >> 2) & 0x3FFFFFF)), f"load hook 0x{hook:X}: {orig:08X}"
+                _patchw(hook, 0x0C000000 | ((stub >> 2) & 0x3FFFFFF))        # jal STUB (was jal tail)
+            # >44 SAVE EXTENSION: persist tracks 45..N by nibble-packing their play-locs into the career slot's
+            # reserved window (Ghidra-verified unused; see SAVE_EXTRAS_* constants). Two cave stubs, gated behind a
+            # version marker so pre-existing saves (no marker) keep tracks 45+ at the baked default (ALL), not OFF.
+            if N > 44 and p.get("save_ser_hook"):
+                Z, AT, V0, A1, T2, T4, T5, T6, T7, T8, T9, S2, S3 = 0, 1, 2, 5, 10, 12, 13, 14, 15, 24, 25, 18, 19
+                pl44 = PLOC + 44                                  # &cave PLOC[44]
+                hi, lo = (pl44 + 0x8000) >> 16, pl44 & 0xFFFF
+                mhi, mlo = SAVE_EXTRAS_MAGIC >> 16, SAVE_EXTRAS_MAGIC & 0xFFFF
+                npack = (N - 44 + 1) // 2                         # bytes needed (2 play-locs/byte)
+                def _a(rt, rs, i):  return 0x24000000 | (rs<<21) | (rt<<16) | (i & 0xFFFF)   # addiu
+                def _lui(rt, i):    return 0x3C000000 | (rt<<16) | (i & 0xFFFF)
+                def _ori(rt, rs, i):return 0x34000000 | (rs<<21) | (rt<<16) | (i & 0xFFFF)
+                def _lw(rt, rs, o): return 0x8C000000 | (rs<<21) | (rt<<16) | (o & 0xFFFF)
+                def _sw(rt, rs, o): return 0xAC000000 | (rs<<21) | (rt<<16) | (o & 0xFFFF)
+                def _lbu(rt, rs, o):return 0x90000000 | (rs<<21) | (rt<<16) | (o & 0xFFFF)
+                def _sb(rt, rs, o): return 0xA0000000 | (rs<<21) | (rt<<16) | (o & 0xFFFF)
+                def _andi(rt,rs,i): return 0x30000000 | (rs<<21) | (rt<<16) | (i & 0xFFFF)
+                def _sll(rd,rt,sh): return (rt<<16) | (rd<<11) | (sh<<6)
+                def _srl(rd,rt,sh): return (rt<<16) | (rd<<11) | (sh<<6) | 0x02
+                def _or(rd,rs,rt):  return (rs<<21) | (rt<<16) | (rd<<11) | 0x25
+                def _bne(rs,rt,off):return 0x14000000 | (rs<<21) | (rt<<16) | (off & 0xFFFF)
+                def _j(t):          return 0x08000000 | ((t >> 2) & 0x3FFFFFF)
+                # 0xE664/0xE668 exceed a signed imm16, so build via two positive addends (0x7000 + 0x76xx).
+                m_a, m_b = 0x7000, SAVE_EXTRAS_MAGIC_OFF - 0x7000
+                ser_hook, ser_tail = p["save_ser_hook"], p["save_ser_tail"]
+                des_hook, des_tail = p["save_des_hook"], p["save_des_tail"]
+                # SERIALIZE stub: write marker @savebuf+MAGIC_OFF, pack PLOC[44..] into DATA_OFF, restore the
+                # replaced `addiu a1,s3,28`, tail to the checksum loop (which then sums the extras -> valid CRC).
+                ser = [
+                    _a(T9,S3,m_a), _a(T9,T9,m_b),                             # t9 = s3 + MAGIC_OFF
+                    _lui(T6,mhi), _ori(T6,T6,mlo), _sw(T6,T9,0),              # [t9] = MAGIC
+                    _lui(T8,hi), _a(T8,T8,lo),                                # t8 = &PLOC[44]
+                    _a(T9,T9,4),                                             # t9 = s3 + DATA_OFF
+                    _a(T7,Z,npack),
+                    _lbu(T6,T8,0), _lbu(T5,T8,1), _andi(T6,T6,0xF), _andi(T5,T5,0xF),
+                    _sll(T5,T5,4), _or(T6,T6,T5), _sb(T6,T9,0),               # packed = lo | (hi<<4)
+                    _a(T8,T8,2), _a(T9,T9,1), _a(T7,T7,-1), _bne(T7,Z,-11), 0,
+                    _j(ser_tail), p["save_ser_orig"],
+                ]
+                # DESERIALIZE stub: if marker present, unpack DATA_OFF back into PLOC[44..]; else leave the baked
+                # default. Restore the replaced `lbu t2,44(v0)` and continue the DJ-field loads.
+                des = [
+                    _a(T8,S2,m_a), _a(T8,T8,m_b), _lw(T6,T8,0),
+                    _lui(T5,mhi), _ori(T5,T5,mlo), _bne(T6,T5,15), _a(T8,T8,4),   # if != MAGIC -> skip (to _j)
+                    _lui(T9,hi), _a(T9,T9,lo), _a(T7,Z,npack),
+                    _lbu(T6,T8,0), _andi(T4,T6,0xF), _sb(T4,T9,0), _srl(T6,T6,4), _andi(T6,T6,0xF), _sb(T6,T9,1),
+                    _a(T8,T8,1), _a(T9,T9,2), _a(T7,T7,-1), _bne(T7,Z,-10), 0,
+                    _j(des_tail), p["save_des_orig"],
+                ]
+                sser, sdes = CAVE + SERSTUB_CAVE_OFF, CAVE + DESSTUB_CAVE_OFF
+                assert _getw(ser_hook) == p["save_ser_orig"], f"ser hook 0x{ser_hook:X}: {_getw(ser_hook):08X}"
+                assert _getw(des_hook) == p["save_des_orig"], f"des hook 0x{des_hook:X}: {_getw(des_hook):08X}"
+                for k, wv in enumerate(ser): _patchw(sser + k*4, wv)
+                for k, wv in enumerate(des): _patchw(sdes + k*4, wv)
+                _patchw(ser_hook, _j(sser)); _patchw(des_hook, _j(sdes))
+            log(f"  per-track fixes: order-array(13) + PLOC reloc+bake + metadata->CAVE + nav-count={N} + save-sync"
+                + (" + >44-persist" if N > 44 else ""))
         else:
             log("  per-track fix: order-array(13) relocated (PAL needs no PLOC/nav-count)")
         # (e3) >99 TRACK-NUMBER DISPLAY fix. The list widget stores each visible row's number in a
